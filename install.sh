@@ -14,7 +14,7 @@ install_prefix="/usr/local"
 
 # Install dependencies
 sudo apt update
-sudo apt install -y libusb-1.0-0-dev libusb-1.0-0 build-essential cmake libncurses5-dev libtecla1 libtecla-dev pkg-config git wget libgsm1-dev autoconf telnet
+sudo apt install -y libusb-1.0-0-dev libusb-1.0-0 build-essential cmake libncurses5-dev libtecla1 libtecla-dev pkg-config git wget libgsm1-dev autoconf telnet libcurl4-openssl-dev
 
 # Setup yate group
 sudo groupadd yate

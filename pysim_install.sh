@@ -5,7 +5,7 @@ git clone https://github.com/osmocom/pysim.git
 cd ./pysim
 if [[ -z "$VIRTUAL_ENV" ]]; then
     echo "No Python virtual environment is active."
-    python3 -m venv /home/briskspirit/.pyvenv
+    python3 -m venv "$(whoami)/.pyvenv"
     echo "source ~/.pyvenv/bin/activate" >> ~/.bashrc
     source ~/.pyvenv/bin/activate
 else
