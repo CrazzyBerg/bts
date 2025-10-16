@@ -1,6 +1,6 @@
-# YateBTS 2024
+# YateBTS 2025
 
-Everything to build and run the latest Yate + YateBTS + bladeRF xA4 for an old GSM 2G base station.
+Everything to build and run the latest Yate + YateBTS + bladeRF xA4 for an old GSM/GPRS 2G base station.
 
 Yate 6.4.1 and YateBTS 6.1.1 use the latest bladeRF firmware and FPGA (tested with 2.4.0 and 0.15.3).
 
@@ -32,8 +32,8 @@ Compilation takes approximately 10-15 minutes on a Raspberry Pi 5. The script wi
 ### Post-Installation Information
 
 - **YateBTS Configuration:**
-  - The base configuration is set for the 1900 MHz band, with MCC=310 and MNC=260.
-  - IMSI regex starts with `310260`.
+  - The base configuration is set for the 900 MHz band, with MCC=001 and MNC=01.
+  - IMSI regex starts with `00101`.
 
 - **To start the Yate service:**
   ```bash
