@@ -7,4 +7,4 @@ sudo nft add table ip nat
 sudo nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
 sudo nft add rule ip nat postrouting oifname "eth0" masquerade
 
-sudo nft list ruleset | sudo tee /etc/nftables.conf > /dev/null
+sudo sh -c 'nft list ruleset > /etc/nftables.conf'
