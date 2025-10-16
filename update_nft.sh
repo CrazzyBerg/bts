@@ -3,8 +3,16 @@
 sudo sed -i 's/^#*net.ipv4.ip_forward=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf && sudo sysctl -p
 
 sudo nft flush ruleset
-sudo nft add table ip nat
-sudo nft add chain ip nat postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
-sudo nft add rule ip nat postrouting oifname "eth0" masquerade
+sudo tee /etc/nftables.conf > /dev/null <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
 
-sudo sh -c 'nft list ruleset > /etc/nftables.conf'
+table ip nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "eth0" masquerade
+    }
+}
+EOF
+
+sudo systemctl enable nftables
