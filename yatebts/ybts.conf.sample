@@ -10,7 +10,7 @@
 ; For non-multiband units this value must match the hardware.
 ; Valid values: 850, 900, 1800, 1900.
 ; THERE IS NO DEFAULT, YOU MUST SET A VALUE HERE!
-Radio.Band=1900
+Radio.Band=900
 
 ; Radio.C0: integer: The C0 ARFCN, also base ARFCN for a multi-ARFCN configuration.
 ; Valid values depend on the selected Radio.Band:
@@ -19,17 +19,17 @@ Radio.Band=1900
 ;  1800 (DSC1800): 512..885
 ;  1900 (PCS1900): 512..810
 ; THERE IS NO DEFAULT, YOU MUST SET A VALUE HERE!
-Radio.C0=756
+Radio.C0=62
 
 ; Identity.MCC: string: Mobile Country Code, must have three digits.
 ; The value 001 is reserved for for test networks.
 ; Defaults to 001 (Test Network).
-Identity.MCC=310
+Identity.MCC=001
 
 ; Identity.MNC: string: Mobile Network Code, must have two or three digits.
 ; The value 01 is usual for test networks with a MCC value set on 001.
 ; Defaults to 01 (Test Network, only in association with Identity.MCC=001).
-Identity.MNC=260
+Identity.MNC=01
 
 ; Identity.LAC: integer: Location Area Code, 16 bits, values 0xFFxx are reserved.
 ; For multi-BTS networks, assign a unique LAC to each BTS unit.
@@ -60,7 +60,7 @@ Identity.MNC=260
 ;Network short name, displayed on some phones.
 ;Optional but must be defined if you also want the network to send time-of-day.
 ;Defaults to YateBTS.
-Identity.ShortName=YateBTS
+Identity.ShortName=TestBTS
 
 ; Radio.PowerManager.MaxAttenDB: integer: Maximum transmitter attenuation level
 ;  in dB wrt full scale on the D/A output.
@@ -84,7 +84,7 @@ Identity.ShortName=YateBTS
 ; Enable: boolean: Advertise GPRS in C0T0 beacon and start service on demand.
 ; See also Channels.* in [gprs_advanced] to find out how many channels are reserved.
 ; Defaults to yes.
-Enable=no
+Enable=yes
 
 ; RAC: integer: GPRS Routing Area Code, as advertised in the C0T0 beacon.
 ; Interval allowed: 0..255.
@@ -104,7 +104,7 @@ Enable=no
 ; By default, DNS servers are taken from the host system.
 ; To override, specify a space-separated list of the DNS servers, in IP dotted notation, eg: 1.2.3.4 5.6.7.8. 
 ; To use the host system DNS servers again, execute 'unconfig GGSN.DNS'.
-;DNS=
+;DNS=1.1.1.1 1.0.0.1
 
 ; Firewall.Enable: integer
 ; 0=no firewall; 1=block the MS attempted access to YateBTS or other MS; 2=block all private IP addresses.

@@ -11,7 +11,7 @@ country_code=1
 ; regular expression or by setting subscribers individually
 ; Note! If a regular expression is used, 2G/3G authentication cannot be used.
 ; Ex: regexp=^001
-regexp=^310260
+regexp=^001
 
 ; Resource for the emergency calls gateway
 ; If not set any emergency calls will be delivered to the outbound gateway

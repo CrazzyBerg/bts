@@ -68,6 +68,11 @@ sudo chmod g+w /usr/local/etc/yate/*.conf
 echo "@yate hard nice -20
 @yate hard rtprio 99" | sudo tee -a /etc/security/limits.conf
 
+# Update nftables
+echo "Updating nftables..."
+sudo chmod +x $script_path/update_nft.sh
+sudo $script_path/update_nft.sh
+
 # Install Yateas a service
 read -p "Do you want to install the Yate as a service? (y/n): " service_install
 if [[ "$service_install" =~ ^[Yy]$ ]]; then
