@@ -660,9 +660,12 @@ function get_regexp($keep_country_code = false)
 				$content = $value["regexp"];
 		}
 	}
-	if (empty($content) || (!is_array($content) && !(is_object($content) && $content instanceof Countable)) || count($content) === 0) {
-		return array(true, "");
-	}
+
+    if (empty($content) ||
+        ((is_array($content) || ($content instanceof Countable)) && count($content) === 0)
+    ) {
+        return [true, ""];
+    }
 	
 	return array(true, $content);
 }
