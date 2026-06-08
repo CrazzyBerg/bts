@@ -10476,25 +10476,10 @@ unsigned int BrfInterface::initialize(const NamedList& params)
      * Care must be taken to not increase this number past 50% of "num buffers"
      *
      */
-    unsigned int txSyncNumBuffers = gen.getIntValue(YSTRING("tx_sync_num_buffers"),32,2,4096);
-    unsigned int txSyncBufferSize = gen.getIntValue(YSTRING("tx_sync_buffer_size"),1024,256,16384);
-    unsigned int txSyncNumTransfers = gen.getIntValue(YSTRING("tx_sync_num_transfers"),6,1,2048);
-    unsigned int txMaxTransfers = txSyncNumBuffers / 2;
-    if (!txMaxTransfers)
-	txMaxTransfers = 1;
-    if (txSyncNumTransfers > txMaxTransfers) {
-	Debug(this,DebugConf,
-	    "Clamping tx_sync_num_transfers=%u to %u: must not exceed half tx_sync_num_buffers [%p]",
-	    txSyncNumTransfers,txMaxTransfers,this);
-	txSyncNumTransfers = txMaxTransfers;
-    }
-    Debug(this,DebugInfo,
-	"Creating TX sync interface buffers=%u buffer_size=%u transfers=%u [%p]",
-	txSyncNumBuffers,txSyncBufferSize,txSyncNumTransfers,this);
     status = bladerf_sync_config((struct bladerf*)lb_dev, BLADERF_TX_X1, BLADERF_FORMAT_SC16_Q11_META,
-                    txSyncNumBuffers, // num buffers
-                    txSyncBufferSize, // buffer size
-                    txSyncNumTransfers, // num transfers
+                    32, // num buffers
+                    1024, // buffer size
+                    6, // num transfers
                     0); // timeout
 
     if (status != 0) {

@@ -64,29 +64,13 @@ fpga_load=no
 ; This value will be decreased to fit an integral number of USB frames
 ; With timestamps enabled: 252 samples on USB2 and 508 samples on USB3
 ; Interval allowed [1024 .. 16384]
-buffered_samples=8192
+;buffered_samples=2048
 
 ; tx_min_buffers: integer: Minimum number of buffers (USB frames) to send
 ; This option is used to accumulate data before sending it (avoid short write operations)
 ; Minimum allowed value is 1
 ; Defaults to the number of allocated buffers
-tx_min_buffers=8
-
-; tx_sync_num_buffers: integer: Number of libbladeRF TX sync buffers
-; Increase together with tx_sync_num_transfers if TX bursts miss the FPGA deadline
-; Allowed interval [2 .. 4096]. Defaults to 32
-tx_sync_num_buffers=48
-
-; tx_sync_buffer_size: integer: Size of each libbladeRF TX sync buffer, in samples
-; If CPU throughput is the issue, try 2048 with fewer buffers/transfers
-; Allowed interval [256 .. 16384]. Defaults to 1024
-tx_sync_buffer_size=1024
-
-; tx_sync_num_transfers: integer: Number of libbladeRF TX async transfers
-; Helpful for USB timeout/underrun issues. Must not exceed half tx_sync_num_buffers
-; Allowed interval [1 .. 2048]. Defaults to 6
-; Raspberry Pi 5 starting point for underruns: 48/1024/12 or 64/1024/16
-tx_sync_num_transfers=12
+;tx_min_buffers=
 
 ; srate_buffered_samples: string: Comma separated list of sampling rate thresholds,
 ;  'buffered_samples' and optional 'tx_min_buffers'
