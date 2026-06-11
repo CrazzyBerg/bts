@@ -84,6 +84,7 @@ class Diagnose:
 
 @dataclass
 class Sample:
+    client_id: str
     imsi: str
     ts: int
     online: int
@@ -389,6 +390,7 @@ def init_db(path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS client_samples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts INTEGER NOT NULL,
+            client_id TEXT,
             imsi TEXT NOT NULL,
             imei TEXT,
             ip TEXT,
@@ -406,6 +408,7 @@ def init_db(path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS client_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts INTEGER NOT NULL,
+            client_id TEXT,
             imsi TEXT NOT NULL,
             event TEXT NOT NULL,
             old_value TEXT,
@@ -416,8 +419,9 @@ def init_db(path: str) -> sqlite3.Connection:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS client_last_status (
-            imsi TEXT PRIMARY KEY,
+            client_id TEXT PRIMARY KEY,
             ts INTEGER NOT NULL,
+            imsi TEXT NOT NULL,
             imei TEXT,
             ip TEXT,
             state TEXT,
@@ -429,14 +433,77 @@ def init_db(path: str) -> sqlite3.Connection:
         )
         """
     )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS imsi_imei_map (
+            imsi TEXT PRIMARY KEY,
+            imei TEXT NOT NULL,
+            first_seen INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            source TEXT NOT NULL
+        )
+        """
+    )
+    ensure_column(db, "client_samples", "client_id", "TEXT")
+    ensure_column(db, "client_events", "client_id", "TEXT")
+    ensure_column(db, "client_last_status", "client_id", "TEXT")
+    ensure_column(db, "client_last_status", "imsi", "TEXT")
+    db.execute("UPDATE client_samples SET client_id = COALESCE(NULLIF(imei, ''), imsi) WHERE client_id IS NULL")
+    db.execute("UPDATE client_events SET client_id = imsi WHERE client_id IS NULL")
+    db.execute("UPDATE client_last_status SET client_id = COALESCE(NULLIF(imei, ''), imsi) WHERE client_id IS NULL")
+    db.execute("UPDATE client_last_status SET imsi = client_id WHERE imsi IS NULL")
     db.execute("CREATE INDEX IF NOT EXISTS idx_samples_imsi_ts ON client_samples(imsi, ts)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_samples_client_ts ON client_samples(client_id, ts)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_events_imsi_ts ON client_events(imsi, ts)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_events_client_ts ON client_events(client_id, ts)")
     db.commit()
     return db
 
 
-def client_to_sample(client: Client, ts: int) -> Sample:
+def ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def lookup_imei(db: sqlite3.Connection, imsi: str) -> str:
+    row = db.execute("SELECT imei FROM imsi_imei_map WHERE imsi = ?", (imsi,)).fetchone()
+    return row[0] if row else ""
+
+
+def resolve_client_id(db: sqlite3.Connection, imsi: str, imei: str) -> str:
+    resolved_imei = imei or lookup_imei(db, imsi)
+    return resolved_imei or imsi
+
+
+def update_imsi_imei_map(db: sqlite3.Connection, ts: int, imsi: str, imei: str, source: str) -> None:
+    if not (imsi and imei):
+        return
+    row = db.execute("SELECT imei FROM imsi_imei_map WHERE imsi = ?", (imsi,)).fetchone()
+    if row and row[0] != imei:
+        insert_event(db, ts, imei, imsi, "IMEI_MAPPING_CHANGED", row[0], imei)
+    db.execute(
+        """
+        INSERT INTO imsi_imei_map (imsi, imei, first_seen, last_seen, source)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(imsi) DO UPDATE SET
+            imei=excluded.imei,
+            last_seen=excluded.last_seen,
+            source=excluded.source
+        """,
+        (imsi, imei, ts, ts, source),
+    )
+    db.execute("UPDATE client_samples SET client_id = ?, imei = ? WHERE imsi = ?", (imei, imei, imsi))
+    db.execute("UPDATE client_events SET client_id = ? WHERE imsi = ?", (imei, imsi))
+
+
+def client_to_sample(client: Client, ts: int, db: sqlite3.Connection) -> Sample:
+    if client.imei:
+        update_imsi_imei_map(db, ts, client.imsi, client.imei, "sgsn")
+    imei = client.imei or lookup_imei(db, client.imsi)
+    client_id = imei or client.imsi
     return Sample(
+        client_id=client_id,
         imsi=client.imsi,
         ts=ts,
         online=1,
@@ -446,7 +513,7 @@ def client_to_sample(client: Client, ts: int) -> Sample:
         state=client.state,
         idle=int(client.idle) if client.idle.isdigit() else None,
         tlli=client.tlli,
-        imei=client.imei,
+        imei=imei,
     )
 
 
@@ -454,11 +521,12 @@ def insert_sample(db: sqlite3.Connection, sample: Sample) -> None:
     db.execute(
         """
         INSERT INTO client_samples
-            (ts, imsi, imei, ip, state, idle, tlli, radio_active, has_ip, online)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (ts, client_id, imsi, imei, ip, state, idle, tlli, radio_active, has_ip, online)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             sample.ts,
+            sample.client_id,
             sample.imsi,
             sample.imei,
             sample.ip,
@@ -472,33 +540,28 @@ def insert_sample(db: sqlite3.Connection, sample: Sample) -> None:
     )
 
 
-def insert_event(db: sqlite3.Connection, ts: int, imsi: str, event: str, old: str = "", new: str = "") -> None:
+def insert_event(db: sqlite3.Connection, ts: int, client_id: str, imsi: str, event: str, old: str = "", new: str = "") -> None:
     db.execute(
-        "INSERT INTO client_events (ts, imsi, event, old_value, new_value) VALUES (?, ?, ?, ?, ?)",
-        (ts, imsi, event, old, new),
+        "INSERT INTO client_events (ts, client_id, imsi, event, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)",
+        (ts, client_id, imsi, event, old, new),
     )
 
 
 def upsert_last_status(db: sqlite3.Connection, sample: Sample) -> None:
     db.execute(
+        "DELETE FROM client_last_status WHERE client_id = ? OR imsi = ?",
+        (sample.client_id, sample.imsi),
+    )
+    db.execute(
         """
         INSERT INTO client_last_status
-            (imsi, ts, imei, ip, state, idle, tlli, radio_active, has_ip, online)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(imsi) DO UPDATE SET
-            ts=excluded.ts,
-            imei=excluded.imei,
-            ip=excluded.ip,
-            state=excluded.state,
-            idle=excluded.idle,
-            tlli=excluded.tlli,
-            radio_active=excluded.radio_active,
-            has_ip=excluded.has_ip,
-            online=excluded.online
+            (client_id, ts, imsi, imei, ip, state, idle, tlli, radio_active, has_ip, online)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            sample.imsi,
+            sample.client_id,
             sample.ts,
+            sample.imsi,
             sample.imei,
             sample.ip,
             sample.state,
@@ -521,58 +584,65 @@ def record_snapshot(args: argparse.Namespace) -> int:
 
     ts = int(time.time())
     clients = [c for c in parse_clients(output) if c.imsi]
-    current = {c.imsi: client_to_sample(c, ts) for c in clients}
     db = init_db(args.db)
     try:
+        current = {}
+        for client in clients:
+            sample = client_to_sample(client, ts, db)
+            current[sample.client_id] = sample
         previous_rows = db.execute(
             """
-            SELECT imsi, ts, imei, ip, state, idle, tlli, radio_active, has_ip, online
+            SELECT client_id, imsi, ts, imei, ip, state, idle, tlli, radio_active, has_ip, online
             FROM client_last_status
             """
         ).fetchall()
         previous = {
             row[0]: Sample(
-                imsi=row[0],
-                ts=row[1],
-                imei=row[2] or "",
-                ip=row[3] or "",
-                state=row[4] or "",
-                idle=row[5],
-                tlli=row[6] or "",
-                radio_active=row[7],
-                has_ip=row[8],
-                online=row[9],
+                client_id=row[0],
+                imsi=row[1],
+                ts=row[2],
+                imei=row[3] or "",
+                ip=row[4] or "",
+                state=row[5] or "",
+                idle=row[6],
+                tlli=row[7] or "",
+                radio_active=row[8],
+                has_ip=row[9],
+                online=row[10],
             )
             for row in previous_rows
         }
 
-        for imsi, sample in current.items():
-            prev = previous.get(imsi)
+        for client_id, sample in current.items():
+            prev = previous.get(client_id)
             insert_sample(db, sample)
             if prev is None:
-                insert_event(db, ts, imsi, "CLIENT_SEEN", "", sample.ip)
+                insert_event(db, ts, sample.client_id, sample.imsi, "CLIENT_SEEN", "", sample.ip)
             else:
+                if prev.imsi and sample.imsi and prev.imsi != sample.imsi:
+                    insert_event(db, ts, sample.client_id, sample.imsi, "SIM_SWITCHED", prev.imsi, sample.imsi)
                 if not prev.online:
-                    insert_event(db, ts, imsi, "CLIENT_RETURNED", "", sample.ip)
+                    insert_event(db, ts, sample.client_id, sample.imsi, "CLIENT_RETURNED", "", sample.ip)
                 if prev.has_ip and not sample.has_ip:
-                    insert_event(db, ts, imsi, "PDP_IP_LOST", prev.ip, "")
+                    insert_event(db, ts, sample.client_id, sample.imsi, "PDP_IP_LOST", prev.ip, "")
                 if not prev.has_ip and sample.has_ip:
-                    insert_event(db, ts, imsi, "PDP_IP_RESTORED", "", sample.ip)
+                    insert_event(db, ts, sample.client_id, sample.imsi, "PDP_IP_RESTORED", "", sample.ip)
                 if prev.ip and sample.ip and prev.ip != sample.ip:
-                    insert_event(db, ts, imsi, "IP_CHANGED", prev.ip, sample.ip)
+                    insert_event(db, ts, sample.client_id, sample.imsi, "IP_CHANGED", prev.ip, sample.ip)
                 if prev.tlli and sample.tlli and prev.tlli != sample.tlli:
-                    insert_event(db, ts, imsi, "TLLI_CHANGED", prev.tlli, sample.tlli)
+                    insert_event(db, ts, sample.client_id, sample.imsi, "TLLI_CHANGED", prev.tlli, sample.tlli)
                 if prev.radio_active and not sample.radio_active:
-                    insert_event(db, ts, imsi, "RADIO_INACTIVE", "active", "not_active")
+                    insert_event(db, ts, sample.client_id, sample.imsi, "RADIO_INACTIVE", "active", "not_active")
                 if not prev.radio_active and sample.radio_active:
-                    insert_event(db, ts, imsi, "RADIO_ACTIVE", "not_active", "active")
+                    insert_event(db, ts, sample.client_id, sample.imsi, "RADIO_ACTIVE", "not_active", "active")
             upsert_last_status(db, sample)
 
-        for imsi, prev in previous.items():
-            if imsi in current or not prev.online:
+        for client_id, prev in previous.items():
+            if client_id in current or not prev.online:
                 continue
             missing = Sample(
-                imsi=imsi,
+                client_id=prev.client_id,
+                imsi=prev.imsi,
                 ts=ts,
                 online=0,
                 has_ip=0,
@@ -584,7 +654,7 @@ def record_snapshot(args: argparse.Namespace) -> int:
                 imei=prev.imei,
             )
             insert_sample(db, missing)
-            insert_event(db, ts, imsi, "CLIENT_MISSING", prev.ip, "")
+            insert_event(db, ts, missing.client_id, missing.imsi, "CLIENT_MISSING", prev.ip, "")
             upsert_last_status(db, missing)
 
         db.commit()
@@ -601,7 +671,9 @@ def report_history(args: argparse.Namespace) -> int:
     try:
         rows = db.execute(
             """
-            SELECT imsi,
+            SELECT client_id,
+                   GROUP_CONCAT(DISTINCT imsi) imsis,
+                   MAX(imei) imei,
                    COUNT(*) samples,
                    SUM(online) online_samples,
                    SUM(has_ip) ip_samples,
@@ -610,17 +682,17 @@ def report_history(args: argparse.Namespace) -> int:
                    MAX(ts) last_ts
             FROM client_samples
             WHERE ts >= ?
-            GROUP BY imsi
-            ORDER BY imsi
+            GROUP BY client_id
+            ORDER BY client_id
             """,
             (since,),
         ).fetchall()
         event_rows = db.execute(
             """
-            SELECT imsi, event, COUNT(*)
+            SELECT client_id, event, COUNT(*)
             FROM client_events
             WHERE ts >= ?
-            GROUP BY imsi, event
+            GROUP BY client_id, event
             """,
             (since,),
         ).fetchall()
@@ -628,15 +700,16 @@ def report_history(args: argparse.Namespace) -> int:
         db.close()
 
     events: dict[str, dict[str, int]] = {}
-    for imsi, event, count in event_rows:
-        events.setdefault(imsi, {})[event] = count
+    for client_id, event, count in event_rows:
+        events.setdefault(client_id, {})[event] = count
 
     print(f"History report for last {args.since_hours:g}h")
     if not rows:
         print("No samples found.")
         return 1
     header = (
-        "IMSI".ljust(18),
+        "CLIENT".ljust(18),
+        "IMSIS".ljust(24),
         "UP%".rjust(6),
         "IP%".rjust(6),
         "RADIO%".rjust(7),
@@ -647,18 +720,72 @@ def report_history(args: argparse.Namespace) -> int:
         "LAST_SEEN".ljust(19),
     )
     print("  ".join(header))
-    print("-" * 92)
-    for imsi, samples, online, ip_samples, radio, max_idle, last_ts in rows:
-        ev = events.get(imsi, {})
+    print("-" * 118)
+    for client_id, imsis, imei, samples, online, ip_samples, radio, max_idle, last_ts in rows:
+        ev = events.get(client_id, {})
         up_pct = pct(online, samples)
         ip_pct = pct(ip_samples, samples)
         radio_pct = pct(radio, samples)
         last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts))
         print(
-            f"{imsi:<18}  {up_pct:>5.1f}%  {ip_pct:>5.1f}%  {radio_pct:>6.1f}%"
+            f"{client_id:<18}  {trim(imsis or '', 24):<24}  {up_pct:>5.1f}%  {ip_pct:>5.1f}%  {radio_pct:>6.1f}%"
             f"  {ev.get('CLIENT_MISSING', 0):>6}  {ev.get('PDP_IP_LOST', 0):>7}"
             f"  {ev.get('TLLI_CHANGED', 0):>5}  {max_idle:>8}  {last_seen:<19}"
         )
+    return 0
+
+
+def parse_sniffer_registers(lines: Iterable[str]) -> list[tuple[int, str, str]]:
+    events: list[tuple[int, str, str]] = []
+    ts = int(time.time())
+    current: dict[str, str] = {}
+    in_register = False
+    for raw in lines:
+        line = raw.rstrip("\n")
+        stamp = re.match(r"(\d{4}-\d{2}-\d{2})[,_ ](\d{2}:\d{2}:\d{2})", line)
+        if stamp:
+            try:
+                ts = int(time.mktime(time.strptime(f"{stamp.group(1)} {stamp.group(2)}", "%Y-%m-%d %H:%M:%S")))
+            except ValueError:
+                ts = int(time.time())
+        if "'user.register'" in line or "Message: user.register" in line:
+            in_register = True
+            current = {}
+            continue
+        if not in_register:
+            continue
+        param = re.search(r"param\['([^']+)'\]\s*=\s*'([^']*)'", line)
+        if param:
+            current[param.group(1)] = param.group(2)
+            if current.get("imsi") and current.get("imei"):
+                events.append((ts, current["imsi"], current["imei"]))
+                current = {}
+                in_register = False
+            continue
+        if line and not line.startswith((" ", "\t")):
+            in_register = False
+            current = {}
+    return events
+
+
+def import_yate_log(args: argparse.Namespace) -> int:
+    if args.read_log_stdin:
+        lines = sys.stdin
+        source = "stdin"
+    else:
+        source = args.import_yate_log
+        with open(source, "r", encoding="utf-8", errors="replace") as f:
+            lines = list(f)
+
+    mappings = parse_sniffer_registers(lines)
+    db = init_db(args.db)
+    try:
+        for ts, imsi, imei in mappings:
+            update_imsi_imei_map(db, ts, imsi, imei, f"user.register:{source}")
+        db.commit()
+    finally:
+        db.close()
+    print(f"Imported {len(mappings)} IMSI↔IMEI mappings from {source} into {args.db}")
     return 0
 
 
@@ -674,28 +801,28 @@ def write_html_report(args: argparse.Namespace) -> int:
     try:
         rows = db.execute(
             """
-            SELECT ts, imsi, online, has_ip, radio_active, ip, state, idle, tlli
+            SELECT ts, client_id, imsi, online, has_ip, radio_active, ip, state, idle, tlli
             FROM client_samples
             WHERE ts >= ?
-            ORDER BY imsi, ts
+            ORDER BY client_id, ts
             """,
             (since,),
         ).fetchall()
         event_rows = db.execute(
             """
-            SELECT ts, imsi, event, old_value, new_value
+            SELECT ts, client_id, imsi, event, old_value, new_value
             FROM client_events
             WHERE ts >= ?
-            ORDER BY imsi, ts
+            ORDER BY client_id, ts
             """,
             (since,),
         ).fetchall()
     finally:
         db.close()
 
-    by_imsi: dict[str, list[tuple]] = {}
+    by_client: dict[str, list[tuple]] = {}
     for row in rows:
-        by_imsi.setdefault(row[1], []).append(row)
+        by_client.setdefault(row[1], []).append(row)
     events: dict[str, list[tuple]] = {}
     for row in event_rows:
         events.setdefault(row[1], []).append(row)
@@ -716,28 +843,31 @@ def write_html_report(args: argparse.Namespace) -> int:
         "<p><span class='pill' style='background:#34c759'>online+IP+radio</span><span class='pill' style='background:#ffd60a;color:#111'>online+IP idle</span><span class='pill' style='background:#ff9f0a;color:#111'>online no IP</span><span class='pill' style='background:#ff453a'>missing</span></p>",
     ]
 
-    if not by_imsi:
+    if not by_client:
         body.append("<p>No samples found.</p>")
-    for imsi, samples in sorted(by_imsi.items()):
-        ev = events.get(imsi, [])
-        drops = sum(1 for e in ev if e[2] == "CLIENT_MISSING")
-        ip_lost = sum(1 for e in ev if e[2] == "PDP_IP_LOST")
-        tlli_changes = sum(1 for e in ev if e[2] == "TLLI_CHANGED")
-        online = sum(1 for s in samples if s[2])
-        ip_samples = sum(1 for s in samples if s[3])
-        radio = sum(1 for s in samples if s[4])
+    for client_id, samples in sorted(by_client.items()):
+        ev = events.get(client_id, [])
+        drops = sum(1 for e in ev if e[3] == "CLIENT_MISSING")
+        ip_lost = sum(1 for e in ev if e[3] == "PDP_IP_LOST")
+        tlli_changes = sum(1 for e in ev if e[3] == "TLLI_CHANGED")
+        sim_switches = sum(1 for e in ev if e[3] == "SIM_SWITCHED")
+        imsis = sorted({s[2] for s in samples if s[2]})
+        online = sum(1 for s in samples if s[3])
+        ip_samples = sum(1 for s in samples if s[4])
+        radio = sum(1 for s in samples if s[5])
         last = samples[-1]
         body.append("<div class='client'>")
         body.append(
-            f"<h2>{html.escape(imsi)}</h2><div class='muted'>"
+            f"<h2>{html.escape(client_id)}</h2><div class='muted'>"
+            f"IMSIs {html.escape(', '.join(imsis) or '-')} | "
             f"uptime {pct(online, len(samples)):.1f}% | ip {pct(ip_samples, len(samples)):.1f}% | "
             f"radio {pct(radio, len(samples)):.1f}% | drops {drops} | ip_lost {ip_lost} | "
-            f"tlli_changes {tlli_changes} | last_ip {html.escape(last[5] or '-')} | "
+            f"tlli_changes {tlli_changes} | sim_switches {sim_switches} | last_ip {html.escape(last[6] or '-')} | "
             f"last_seen {html.escape(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last[0])))}"
             "</div>"
         )
         body.append("<div class='timeline'>")
-        for ts, _, online_v, has_ip, radio_active, ip, state, idle, tlli in samples:
+        for ts, _, imsi, online_v, has_ip, radio_active, ip, state, idle, tlli in samples:
             if not online_v:
                 cls = "down"
             elif not has_ip:
@@ -746,16 +876,16 @@ def write_html_report(args: argparse.Namespace) -> int:
                 cls = "idle"
             else:
                 cls = "ok"
-            title = f"{time.strftime('%H:%M:%S', time.localtime(ts))} ip={ip or '-'} state={state or '-'} idle={idle if idle is not None else '-'} tlli={tlli or '-'}"
+            title = f"{time.strftime('%H:%M:%S', time.localtime(ts))} imsi={imsi or '-'} ip={ip or '-'} state={state or '-'} idle={idle if idle is not None else '-'} tlli={tlli or '-'}"
             body.append(f"<span class='seg {cls}' title='{html.escape(title)}'></span>")
         body.append("</div>")
         if ev:
-            body.append("<table><tr><th>Time</th><th>Event</th><th>Old</th><th>New</th></tr>")
-            for ts, _, event, old, new in ev[-20:]:
+            body.append("<table><tr><th>Time</th><th>Event</th><th>IMSI</th><th>Old</th><th>New</th></tr>")
+            for ts, _, imsi, event, old, new in ev[-20:]:
                 body.append(
                     "<tr>"
                     f"<td>{html.escape(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)))}</td>"
-                    f"<td>{html.escape(event)}</td><td>{html.escape(old or '')}</td><td>{html.escape(new or '')}</td>"
+                    f"<td>{html.escape(event)}</td><td>{html.escape(imsi or '')}</td><td>{html.escape(old or '')}</td><td>{html.escape(new or '')}</td>"
                     "</tr>"
                 )
             body.append("</table>")
@@ -769,6 +899,8 @@ def write_html_report(args: argparse.Namespace) -> int:
 
 
 def once(args: argparse.Namespace) -> int:
+    if args.import_yate_log or args.read_log_stdin:
+        return import_yate_log(args)
     if args.report:
         return report_history(args)
     if args.html_report:
@@ -815,6 +947,8 @@ def main() -> int:
     parser.add_argument("--report", action="store_true", help="Print per-client stability report from SQLite history")
     parser.add_argument("--html-report", default="", help="Write standalone per-client HTML timeline report")
     parser.add_argument("--since-hours", type=float, default=24.0, help="History window for reports")
+    parser.add_argument("--import-yate-log", default="", help="Import Yate sniffer user.register log and map IMSI to IMEI")
+    parser.add_argument("--read-log-stdin", action="store_true", help="Read Yate sniffer user.register log from stdin")
     args = parser.parse_args()
 
     if args.watch <= 0:
