@@ -25,6 +25,7 @@
 
 #include <Configuration.h>
 #include "ybts.h"
+#include "../GPRS/GPRSInternal.h"
 
 ConfigurationKeyMap getConfigurationKeys()
 {
@@ -968,6 +969,18 @@ ConfigurationKeyMap getConfigurationKeys()
 		false,
 		"Nonresponsive downlink TBF resource release timer, in milliseconds. "
 			"See GSM04.60 Section 13."
+	);
+	map[tmp->getName()] = *tmp;
+	delete tmp;
+
+	tmp = new ConfigurationKey("GPRS.USF.DeadTime","5000",
+		"milliseconds",
+		ConfigurationKey::DEVELOPER,
+		ConfigurationKey::VALRANGE,
+		"0:5000(100)",
+		false,
+		"How long in milliseconds to reserve a USF after a TBF failure. "
+			"If 0, the BTS uses the legacy default of 5000 milliseconds."
 	);
 	map[tmp->getName()] = *tmp;
 	delete tmp;

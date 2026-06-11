@@ -274,7 +274,8 @@ int USFList::freeUSF(MSInfo *ms, bool wReserve)
 		UsfInfo *info = &mlUSFs[usf];
 		if (info->muMS == ms) {
 			if (wReserve) {
-				info->muDeadTime.setFuture(5000);	// This is 5 seconds, not programmable.
+				unsigned usfDeadMs = gConfig.getNum("GPRS.USF.DeadTime");
+				info->muDeadTime.setFuture(usfDeadMs ? usfDeadMs : 5000);
 			} else {
 				info->muMS = 0;
 				info->muDeadTime.setInvalid();		// Make sure usf is reusable.

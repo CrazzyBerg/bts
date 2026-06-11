@@ -19,6 +19,9 @@
 #include <stdint.h>
 #include "GPRSRLC.h"
 
+// Enable dynamic GPRS channel limiting through GPRS.Channels.Max.
+#define GPRS_CHANNELS_MAX_SUPPORTED 1
+
 
 namespace GPRS {
 	// FEC.h:

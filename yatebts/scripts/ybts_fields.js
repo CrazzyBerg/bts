@@ -120,6 +120,7 @@ YbtsConfig.prototype.validations =  {
 	"Channels.Min.C0=": {"minimum": 0, "maximum": 7},
 	"Channels.Min.CN=": {"minimum": 0,"maximum": 100},
 	"Channels.Max=": {"minimum": 0, "maximum": 10},
+	"USF.DeadTime=": {"minimum": 0, "maximum": 5000},
 	"Counters.Assign=": {"minimum": 5, "maximum": 15},
 	"Counters.N3101=": {"minimum": 8, "maximum": 32},
 	"Counters.N3103=": {"minimum": 4, "maximum": 12},

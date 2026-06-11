@@ -732,6 +732,11 @@ Radio.RSSITarget=-50
 ; Interval allowed 0:10. Defaults to 4.
 ;Channels.Max=4
 
+; USF.DeadTime: integer: Milliseconds to reserve USF after TBF failure.
+; Set lower for bursty IoT traffic. If 0, legacy default 5000 is used.
+; Interval allowed 0:5000(100). Defaults to 5000.
+;USF.DeadTime=1500
+
 ; Counters.Assign: integer: Maximum number of assign messages sent.
 ; Interval allowed 5:15. Defaults to 10.
 ;Counters.Assign=10
