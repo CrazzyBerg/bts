@@ -28,6 +28,17 @@ SB = 250
 SE = 240
 
 DEFAULT_COMMAND = "mbts sgsn list"
+DIAG_COMMANDS = {
+    "sgsn": "mbts sgsn list",
+    "gprs": "mbts gprs stat",
+    "load": "mbts load",
+    "tbf": "mbts gprs list tbf",
+    "ch": "mbts gprs list ch",
+}
+
+
+class YateUnavailableError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -49,6 +60,23 @@ class Client:
     @property
     def radio_active(self) -> bool:
         return bool(self.ms and self.ms.lower() != "not_active")
+
+
+@dataclass
+class Diagnose:
+    clients: list[Client]
+    outputs: dict[str, str]
+    pdch: int | None = None
+    mac_ms: int | None = None
+    tbf: int | None = None
+    dl_utilization: float | None = None
+    sdcch_active: int | None = None
+    sdcch_total: int | None = None
+    tch_active: int | None = None
+    tch_total: int | None = None
+    agch_load: str = ""
+    pch_load: str = ""
+    paging_size: int | None = None
 
 
 class TelnetSocket:
@@ -104,7 +132,10 @@ def strip_telnet_iac(data: bytes) -> bytes:
 
 
 def run_command(host: str, port: int, command: str, timeout: float) -> str:
-    conn = TelnetSocket(host, port, timeout)
+    try:
+        conn = TelnetSocket(host, port, timeout)
+    except OSError as exc:
+        raise YateUnavailableError(f"Yate is not reachable at {host}:{port}: {exc}") from exc
     try:
         # Drain greeting/banner first. Yate rmanager usually prints it immediately.
         conn.read_idle(idle_timeout=0.3, max_wait=1.5)
@@ -112,6 +143,23 @@ def run_command(host: str, port: int, command: str, timeout: float) -> str:
         output = conn.read_idle(idle_timeout=0.5, max_wait=timeout)
         conn.write_line("quit")
         return output
+    finally:
+        conn.close()
+
+
+def run_commands(host: str, port: int, commands: dict[str, str], timeout: float) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    try:
+        conn = TelnetSocket(host, port, timeout)
+    except OSError as exc:
+        raise YateUnavailableError(f"Yate is not reachable at {host}:{port}: {exc}") from exc
+    try:
+        conn.read_idle(idle_timeout=0.3, max_wait=1.5)
+        for name, command in commands.items():
+            conn.write_line(command)
+            outputs[name] = conn.read_idle(idle_timeout=0.5, max_wait=timeout)
+        conn.write_line("quit")
+        return outputs
     finally:
         conn.close()
 
@@ -176,8 +224,155 @@ def trim(value: str, width: int) -> str:
     return value[: max(0, width - 1)] + "~"
 
 
+def parse_int(value: str) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_gprs_stat(output: str, diag: Diagnose) -> None:
+    current = re.search(r"Current number of\s+PDCH=(\d+)\s+MS=(\d+)\s+TBF=(\d+)", output)
+    if current:
+        diag.pdch = parse_int(current.group(1))
+        diag.mac_ms = parse_int(current.group(2))
+        diag.tbf = parse_int(current.group(3))
+    util = re.search(r"Downlink utilization=([0-9.]+)", output)
+    if util:
+        try:
+            diag.dl_utilization = float(util.group(1))
+        except ValueError:
+            pass
+
+
+def parse_load(output: str, diag: Diagnose) -> None:
+    sdcch = re.search(r"SDCCH load:\s*(\d+)/(\d+)", output)
+    if sdcch:
+        diag.sdcch_active = parse_int(sdcch.group(1))
+        diag.sdcch_total = parse_int(sdcch.group(2))
+    tch = re.search(r"TCH/F load:\s*(\d+)/(\d+)", output)
+    if tch:
+        diag.tch_active = parse_int(tch.group(1))
+        diag.tch_total = parse_int(tch.group(2))
+    agch_pch = re.search(r"AGCH/PCH load:\s*([^,\s]+),([^\s]+)", output)
+    if agch_pch:
+        diag.agch_load = agch_pch.group(1)
+        diag.pch_load = agch_pch.group(2)
+    paging = re.search(r"Paging table size:\s*(\d+)", output)
+    if paging:
+        diag.paging_size = parse_int(paging.group(1))
+
+
+def count_lines(output: str, token: str) -> int:
+    return sum(1 for line in output.splitlines() if token in line)
+
+
+def build_diagnose(args: argparse.Namespace) -> Diagnose | None:
+    try:
+        outputs = run_commands(args.host, args.port, DIAG_COMMANDS, args.timeout)
+    except YateUnavailableError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("Check: sudo systemctl status yate.service", file=sys.stderr)
+        return None
+    diag = Diagnose(clients=parse_clients(outputs.get("sgsn", "")), outputs=outputs)
+    parse_gprs_stat(outputs.get("gprs", ""), diag)
+    parse_load(outputs.get("load", ""), diag)
+    return diag
+
+
+def print_diagnose(args: argparse.Namespace) -> int:
+    diag = build_diagnose(args)
+    if diag is None:
+        return 2
+
+    contexts = len(diag.clients)
+    pdp_active = sum(1 for c in diag.clients if c.has_ip)
+    no_ip = contexts - pdp_active
+    radio_active = sum(1 for c in diag.clients if c.radio_active)
+    idles = [int(c.idle) for c in diag.clients if c.idle.isdigit()]
+    max_idle = max(idles) if idles else None
+    avg_idle = sum(idles) / len(idles) if idles else None
+    listed_tbf = count_lines(diag.outputs.get("tbf", ""), "TBF#")
+    listed_ch = count_lines(diag.outputs.get("ch", ""), "PDCH")
+
+    warnings: list[tuple[str, str]] = []
+    if contexts == 0:
+        warnings.append(("CRIT", "no SGSN GMM contexts parsed; clients may be detached or command output changed"))
+    if args.expected_clients and pdp_active < args.expected_clients:
+        warnings.append(("WARN", f"PDP/IP active {pdp_active} < expected {args.expected_clients}"))
+    if contexts and no_ip / contexts >= 0.2:
+        warnings.append(("WARN", f"{no_ip}/{contexts} SGSN contexts have no IP"))
+    if diag.dl_utilization is not None and diag.dl_utilization >= args.warn_utilization:
+        warnings.append(("WARN", f"GPRS downlink utilization is high: {diag.dl_utilization:.1f}"))
+    if diag.tbf is not None and diag.tbf >= args.warn_tbf:
+        warnings.append(("WARN", f"active TBF count is high: {diag.tbf}"))
+    if diag.mac_ms is not None and pdp_active and diag.mac_ms == 0:
+        warnings.append(("WARN", "PDP clients exist but MAC MS count is 0; radio side is idle or stalled"))
+    if diag.pdch is not None and diag.pdch == 0 and pdp_active:
+        warnings.append(("CRIT", "PDP clients exist but no active PDCH"))
+    if diag.sdcch_total and diag.sdcch_active is not None and diag.sdcch_active / diag.sdcch_total >= 0.8:
+        warnings.append(("WARN", f"SDCCH load is high: {diag.sdcch_active}/{diag.sdcch_total}"))
+    if diag.tch_total and diag.tch_active is not None and diag.tch_active / diag.tch_total >= 0.8:
+        warnings.append(("WARN", f"TCH/F load is high: {diag.tch_active}/{diag.tch_total}"))
+    if diag.paging_size is not None and diag.paging_size >= args.warn_paging:
+        warnings.append(("WARN", f"paging table is high: {diag.paging_size}"))
+    if max_idle is not None and max_idle >= args.warn_idle:
+        warnings.append(("WARN", f"max SGSN idle is high: {max_idle}s"))
+
+    severity = "OK"
+    if any(level == "CRIT" for level, _ in warnings):
+        severity = "CRIT"
+    elif warnings:
+        severity = "WARN"
+
+    print(f"Status: {severity}")
+    print("SGSN:")
+    print(f"  contexts: {contexts}")
+    print(f"  pdp_ip_active: {pdp_active}")
+    print(f"  no_ip: {no_ip}")
+    print(f"  radio_active_now: {radio_active}")
+    if max_idle is not None:
+        print(f"  idle: avg={avg_idle:.1f}s max={max_idle}s")
+    print("GPRS:")
+    print(f"  pdch: {value_or_unknown(diag.pdch)}")
+    print(f"  mac_ms: {value_or_unknown(diag.mac_ms)}")
+    print(f"  tbf: {value_or_unknown(diag.tbf)}")
+    print(f"  listed_tbf: {listed_tbf}")
+    print(f"  listed_pdch_lines: {listed_ch}")
+    print(f"  downlink_utilization: {value_or_unknown(diag.dl_utilization)}")
+    print("BTS:")
+    print(f"  sdcch: {ratio_or_unknown(diag.sdcch_active, diag.sdcch_total)}")
+    print(f"  tch_f: {ratio_or_unknown(diag.tch_active, diag.tch_total)}")
+    print(f"  agch_pch: {diag.agch_load or '?'},{diag.pch_load or '?'}")
+    print(f"  paging_table: {value_or_unknown(diag.paging_size)}")
+    print("Verdict:")
+    if warnings:
+        for level, msg in warnings:
+            print(f"  {level}: {msg}")
+    else:
+        print("  OK: no obvious bottleneck from parsed counters")
+    return 0 if severity == "OK" else (2 if severity == "CRIT" else 1)
+
+
+def value_or_unknown(value: object) -> str:
+    return "?" if value is None else str(value)
+
+
+def ratio_or_unknown(active: int | None, total: int | None) -> str:
+    if active is None or total is None:
+        return "?/?"
+    return f"{active}/{total}"
+
+
 def once(args: argparse.Namespace) -> int:
-    output = run_command(args.host, args.port, args.command, args.timeout)
+    if args.diagnose:
+        return print_diagnose(args)
+    try:
+        output = run_command(args.host, args.port, args.command, args.timeout)
+    except YateUnavailableError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("Check: sudo systemctl status yate.service", file=sys.stderr)
+        return 2
     clients = parse_clients(output)
     if args.raw:
         print(output.rstrip())
@@ -199,6 +394,12 @@ def main() -> int:
     parser.add_argument("--watch", type=float, default=0.0, help="Refresh interval in seconds")
     parser.add_argument("--all", action="store_true", help="Show all GMM contexts, including IPs=none")
     parser.add_argument("--raw", action="store_true", help="Print raw command output")
+    parser.add_argument("--diagnose", action="store_true", help="Collect SGSN/GPRS/BTS counters and print OK/WARN/CRIT")
+    parser.add_argument("--expected-clients", type=int, default=0, help="Warn if PDP/IP active clients are below this")
+    parser.add_argument("--warn-utilization", type=float, default=80.0, help="Warn if GPRS downlink utilization reaches this value")
+    parser.add_argument("--warn-tbf", type=int, default=12, help="Warn if active TBF count reaches this value")
+    parser.add_argument("--warn-idle", type=int, default=300, help="Warn if any SGSN context idle time reaches this many seconds")
+    parser.add_argument("--warn-paging", type=int, default=10, help="Warn if paging table size reaches this value")
     args = parser.parse_args()
 
     if args.watch <= 0:
