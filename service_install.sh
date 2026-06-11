@@ -13,6 +13,14 @@ Type=simple
 User=root
 ExecStart=/usr/local/bin/yate
 Restart=on-failure
+Nice=-10
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=20
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+LimitNICE=-20
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
 StandardOutput=journal
 StandardError=append:/var/log/yate.err
 
