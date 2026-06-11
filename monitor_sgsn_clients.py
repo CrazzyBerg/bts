@@ -12,8 +12,10 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import html
 import re
 import socket
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -28,6 +30,7 @@ SB = 250
 SE = 240
 
 DEFAULT_COMMAND = "mbts sgsn list"
+DEFAULT_DB = "sgsn_clients.db"
 DIAG_COMMANDS = {
     "sgsn": "mbts sgsn list",
     "gprs": "mbts gprs stat",
@@ -77,6 +80,20 @@ class Diagnose:
     agch_load: str = ""
     pch_load: str = ""
     paging_size: int | None = None
+
+
+@dataclass
+class Sample:
+    imsi: str
+    ts: int
+    online: int
+    has_ip: int
+    radio_active: int
+    ip: str = ""
+    state: str = ""
+    idle: int | None = None
+    tlli: str = ""
+    imei: str = ""
 
 
 class TelnetSocket:
@@ -364,7 +381,400 @@ def ratio_or_unknown(active: int | None, total: int | None) -> str:
     return f"{active}/{total}"
 
 
+def init_db(path: str) -> sqlite3.Connection:
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            imsi TEXT NOT NULL,
+            imei TEXT,
+            ip TEXT,
+            state TEXT,
+            idle INTEGER,
+            tlli TEXT,
+            radio_active INTEGER NOT NULL,
+            has_ip INTEGER NOT NULL,
+            online INTEGER NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            imsi TEXT NOT NULL,
+            event TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_last_status (
+            imsi TEXT PRIMARY KEY,
+            ts INTEGER NOT NULL,
+            imei TEXT,
+            ip TEXT,
+            state TEXT,
+            idle INTEGER,
+            tlli TEXT,
+            radio_active INTEGER NOT NULL,
+            has_ip INTEGER NOT NULL,
+            online INTEGER NOT NULL
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_samples_imsi_ts ON client_samples(imsi, ts)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_events_imsi_ts ON client_events(imsi, ts)")
+    db.commit()
+    return db
+
+
+def client_to_sample(client: Client, ts: int) -> Sample:
+    return Sample(
+        imsi=client.imsi,
+        ts=ts,
+        online=1,
+        has_ip=1 if client.has_ip else 0,
+        radio_active=1 if client.radio_active else 0,
+        ip=client.ips if client.has_ip else "",
+        state=client.state,
+        idle=int(client.idle) if client.idle.isdigit() else None,
+        tlli=client.tlli,
+        imei=client.imei,
+    )
+
+
+def insert_sample(db: sqlite3.Connection, sample: Sample) -> None:
+    db.execute(
+        """
+        INSERT INTO client_samples
+            (ts, imsi, imei, ip, state, idle, tlli, radio_active, has_ip, online)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            sample.ts,
+            sample.imsi,
+            sample.imei,
+            sample.ip,
+            sample.state,
+            sample.idle,
+            sample.tlli,
+            sample.radio_active,
+            sample.has_ip,
+            sample.online,
+        ),
+    )
+
+
+def insert_event(db: sqlite3.Connection, ts: int, imsi: str, event: str, old: str = "", new: str = "") -> None:
+    db.execute(
+        "INSERT INTO client_events (ts, imsi, event, old_value, new_value) VALUES (?, ?, ?, ?, ?)",
+        (ts, imsi, event, old, new),
+    )
+
+
+def upsert_last_status(db: sqlite3.Connection, sample: Sample) -> None:
+    db.execute(
+        """
+        INSERT INTO client_last_status
+            (imsi, ts, imei, ip, state, idle, tlli, radio_active, has_ip, online)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(imsi) DO UPDATE SET
+            ts=excluded.ts,
+            imei=excluded.imei,
+            ip=excluded.ip,
+            state=excluded.state,
+            idle=excluded.idle,
+            tlli=excluded.tlli,
+            radio_active=excluded.radio_active,
+            has_ip=excluded.has_ip,
+            online=excluded.online
+        """,
+        (
+            sample.imsi,
+            sample.ts,
+            sample.imei,
+            sample.ip,
+            sample.state,
+            sample.idle,
+            sample.tlli,
+            sample.radio_active,
+            sample.has_ip,
+            sample.online,
+        ),
+    )
+
+
+def record_snapshot(args: argparse.Namespace) -> int:
+    try:
+        output = run_command(args.host, args.port, DEFAULT_COMMAND, args.timeout)
+    except YateUnavailableError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("Check: sudo systemctl status yate.service", file=sys.stderr)
+        return 2
+
+    ts = int(time.time())
+    clients = [c for c in parse_clients(output) if c.imsi]
+    current = {c.imsi: client_to_sample(c, ts) for c in clients}
+    db = init_db(args.db)
+    try:
+        previous_rows = db.execute(
+            """
+            SELECT imsi, ts, imei, ip, state, idle, tlli, radio_active, has_ip, online
+            FROM client_last_status
+            """
+        ).fetchall()
+        previous = {
+            row[0]: Sample(
+                imsi=row[0],
+                ts=row[1],
+                imei=row[2] or "",
+                ip=row[3] or "",
+                state=row[4] or "",
+                idle=row[5],
+                tlli=row[6] or "",
+                radio_active=row[7],
+                has_ip=row[8],
+                online=row[9],
+            )
+            for row in previous_rows
+        }
+
+        for imsi, sample in current.items():
+            prev = previous.get(imsi)
+            insert_sample(db, sample)
+            if prev is None:
+                insert_event(db, ts, imsi, "CLIENT_SEEN", "", sample.ip)
+            else:
+                if not prev.online:
+                    insert_event(db, ts, imsi, "CLIENT_RETURNED", "", sample.ip)
+                if prev.has_ip and not sample.has_ip:
+                    insert_event(db, ts, imsi, "PDP_IP_LOST", prev.ip, "")
+                if not prev.has_ip and sample.has_ip:
+                    insert_event(db, ts, imsi, "PDP_IP_RESTORED", "", sample.ip)
+                if prev.ip and sample.ip and prev.ip != sample.ip:
+                    insert_event(db, ts, imsi, "IP_CHANGED", prev.ip, sample.ip)
+                if prev.tlli and sample.tlli and prev.tlli != sample.tlli:
+                    insert_event(db, ts, imsi, "TLLI_CHANGED", prev.tlli, sample.tlli)
+                if prev.radio_active and not sample.radio_active:
+                    insert_event(db, ts, imsi, "RADIO_INACTIVE", "active", "not_active")
+                if not prev.radio_active and sample.radio_active:
+                    insert_event(db, ts, imsi, "RADIO_ACTIVE", "not_active", "active")
+            upsert_last_status(db, sample)
+
+        for imsi, prev in previous.items():
+            if imsi in current or not prev.online:
+                continue
+            missing = Sample(
+                imsi=imsi,
+                ts=ts,
+                online=0,
+                has_ip=0,
+                radio_active=0,
+                ip="",
+                state="missing",
+                idle=None,
+                tlli=prev.tlli,
+                imei=prev.imei,
+            )
+            insert_sample(db, missing)
+            insert_event(db, ts, imsi, "CLIENT_MISSING", prev.ip, "")
+            upsert_last_status(db, missing)
+
+        db.commit()
+    finally:
+        db.close()
+
+    print(f"Recorded {len(current)} clients at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))} into {args.db}")
+    return 0
+
+
+def report_history(args: argparse.Namespace) -> int:
+    db = init_db(args.db)
+    since = int(time.time() - args.since_hours * 3600)
+    try:
+        rows = db.execute(
+            """
+            SELECT imsi,
+                   COUNT(*) samples,
+                   SUM(online) online_samples,
+                   SUM(has_ip) ip_samples,
+                   SUM(radio_active) radio_samples,
+                   MAX(COALESCE(idle, 0)) max_idle,
+                   MAX(ts) last_ts
+            FROM client_samples
+            WHERE ts >= ?
+            GROUP BY imsi
+            ORDER BY imsi
+            """,
+            (since,),
+        ).fetchall()
+        event_rows = db.execute(
+            """
+            SELECT imsi, event, COUNT(*)
+            FROM client_events
+            WHERE ts >= ?
+            GROUP BY imsi, event
+            """,
+            (since,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    events: dict[str, dict[str, int]] = {}
+    for imsi, event, count in event_rows:
+        events.setdefault(imsi, {})[event] = count
+
+    print(f"History report for last {args.since_hours:g}h")
+    if not rows:
+        print("No samples found.")
+        return 1
+    header = (
+        "IMSI".ljust(18),
+        "UP%".rjust(6),
+        "IP%".rjust(6),
+        "RADIO%".rjust(7),
+        "DROPS".rjust(6),
+        "IP_LOST".rjust(7),
+        "TLLI".rjust(5),
+        "MAX_IDLE".rjust(8),
+        "LAST_SEEN".ljust(19),
+    )
+    print("  ".join(header))
+    print("-" * 92)
+    for imsi, samples, online, ip_samples, radio, max_idle, last_ts in rows:
+        ev = events.get(imsi, {})
+        up_pct = pct(online, samples)
+        ip_pct = pct(ip_samples, samples)
+        radio_pct = pct(radio, samples)
+        last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_ts))
+        print(
+            f"{imsi:<18}  {up_pct:>5.1f}%  {ip_pct:>5.1f}%  {radio_pct:>6.1f}%"
+            f"  {ev.get('CLIENT_MISSING', 0):>6}  {ev.get('PDP_IP_LOST', 0):>7}"
+            f"  {ev.get('TLLI_CHANGED', 0):>5}  {max_idle:>8}  {last_seen:<19}"
+        )
+    return 0
+
+
+def pct(part: int | float | None, total: int | float | None) -> float:
+    if not total:
+        return 0.0
+    return 100.0 * float(part or 0) / float(total)
+
+
+def write_html_report(args: argparse.Namespace) -> int:
+    db = init_db(args.db)
+    since = int(time.time() - args.since_hours * 3600)
+    try:
+        rows = db.execute(
+            """
+            SELECT ts, imsi, online, has_ip, radio_active, ip, state, idle, tlli
+            FROM client_samples
+            WHERE ts >= ?
+            ORDER BY imsi, ts
+            """,
+            (since,),
+        ).fetchall()
+        event_rows = db.execute(
+            """
+            SELECT ts, imsi, event, old_value, new_value
+            FROM client_events
+            WHERE ts >= ?
+            ORDER BY imsi, ts
+            """,
+            (since,),
+        ).fetchall()
+    finally:
+        db.close()
+
+    by_imsi: dict[str, list[tuple]] = {}
+    for row in rows:
+        by_imsi.setdefault(row[1], []).append(row)
+    events: dict[str, list[tuple]] = {}
+    for row in event_rows:
+        events.setdefault(row[1], []).append(row)
+
+    body = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        "<title>YateBTS Client Stability</title>",
+        "<style>",
+        "body{font-family:Arial,sans-serif;background:#101418;color:#e7edf3;margin:24px}",
+        "h1{margin:0 0 8px}.muted{color:#9aa7b2}.client{background:#182029;border:1px solid #2c3945;border-radius:10px;padding:14px;margin:12px 0}",
+        ".timeline{display:flex;gap:1px;height:22px;margin:8px 0}.seg{flex:1;min-width:3px;border-radius:2px}",
+        ".ok{background:#34c759}.idle{background:#ffd60a}.noip{background:#ff9f0a}.down{background:#ff453a}",
+        "table{border-collapse:collapse;width:100%;font-size:13px}td,th{border-bottom:1px solid #2c3945;padding:4px 6px;text-align:left}",
+        ".pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#273442;margin-right:6px}",
+        "</style></head><body>",
+        "<h1>YateBTS Client Stability</h1>",
+        f"<div class='muted'>Generated {html.escape(time.strftime('%Y-%m-%d %H:%M:%S'))}, window {args.since_hours:g}h</div>",
+        "<p><span class='pill' style='background:#34c759'>online+IP+radio</span><span class='pill' style='background:#ffd60a;color:#111'>online+IP idle</span><span class='pill' style='background:#ff9f0a;color:#111'>online no IP</span><span class='pill' style='background:#ff453a'>missing</span></p>",
+    ]
+
+    if not by_imsi:
+        body.append("<p>No samples found.</p>")
+    for imsi, samples in sorted(by_imsi.items()):
+        ev = events.get(imsi, [])
+        drops = sum(1 for e in ev if e[2] == "CLIENT_MISSING")
+        ip_lost = sum(1 for e in ev if e[2] == "PDP_IP_LOST")
+        tlli_changes = sum(1 for e in ev if e[2] == "TLLI_CHANGED")
+        online = sum(1 for s in samples if s[2])
+        ip_samples = sum(1 for s in samples if s[3])
+        radio = sum(1 for s in samples if s[4])
+        last = samples[-1]
+        body.append("<div class='client'>")
+        body.append(
+            f"<h2>{html.escape(imsi)}</h2><div class='muted'>"
+            f"uptime {pct(online, len(samples)):.1f}% | ip {pct(ip_samples, len(samples)):.1f}% | "
+            f"radio {pct(radio, len(samples)):.1f}% | drops {drops} | ip_lost {ip_lost} | "
+            f"tlli_changes {tlli_changes} | last_ip {html.escape(last[5] or '-')} | "
+            f"last_seen {html.escape(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last[0])))}"
+            "</div>"
+        )
+        body.append("<div class='timeline'>")
+        for ts, _, online_v, has_ip, radio_active, ip, state, idle, tlli in samples:
+            if not online_v:
+                cls = "down"
+            elif not has_ip:
+                cls = "noip"
+            elif not radio_active:
+                cls = "idle"
+            else:
+                cls = "ok"
+            title = f"{time.strftime('%H:%M:%S', time.localtime(ts))} ip={ip or '-'} state={state or '-'} idle={idle if idle is not None else '-'} tlli={tlli or '-'}"
+            body.append(f"<span class='seg {cls}' title='{html.escape(title)}'></span>")
+        body.append("</div>")
+        if ev:
+            body.append("<table><tr><th>Time</th><th>Event</th><th>Old</th><th>New</th></tr>")
+            for ts, _, event, old, new in ev[-20:]:
+                body.append(
+                    "<tr>"
+                    f"<td>{html.escape(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)))}</td>"
+                    f"<td>{html.escape(event)}</td><td>{html.escape(old or '')}</td><td>{html.escape(new or '')}</td>"
+                    "</tr>"
+                )
+            body.append("</table>")
+        body.append("</div>")
+    body.append("</body></html>")
+
+    with open(args.html_report, "w", encoding="utf-8") as f:
+        f.write("\n".join(body))
+    print(f"Wrote {args.html_report}")
+    return 0
+
+
 def once(args: argparse.Namespace) -> int:
+    if args.report:
+        return report_history(args)
+    if args.html_report:
+        return write_html_report(args)
+    if args.record:
+        return record_snapshot(args)
     if args.diagnose:
         return print_diagnose(args)
     try:
@@ -400,6 +810,11 @@ def main() -> int:
     parser.add_argument("--warn-tbf", type=int, default=12, help="Warn if active TBF count reaches this value")
     parser.add_argument("--warn-idle", type=int, default=300, help="Warn if any SGSN context idle time reaches this many seconds")
     parser.add_argument("--warn-paging", type=int, default=10, help="Warn if paging table size reaches this value")
+    parser.add_argument("--record", action="store_true", help="Record current SGSN snapshot to SQLite")
+    parser.add_argument("--db", default=DEFAULT_DB, help="SQLite history database path")
+    parser.add_argument("--report", action="store_true", help="Print per-client stability report from SQLite history")
+    parser.add_argument("--html-report", default="", help="Write standalone per-client HTML timeline report")
+    parser.add_argument("--since-hours", type=float, default=24.0, help="History window for reports")
     args = parser.parse_args()
 
     if args.watch <= 0:
