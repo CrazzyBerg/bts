@@ -17,6 +17,7 @@ import re
 import socket
 import sqlite3
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Iterable
@@ -121,6 +122,16 @@ class TelnetSocket:
                 break
             chunks.append(strip_telnet_iac(chunk))
         return b"".join(chunks).decode("utf-8", errors="replace")
+
+    def read_some(self, timeout: float) -> str:
+        self.sock.settimeout(timeout)
+        try:
+            data = self.sock.recv(8192)
+        except socket.timeout:
+            return ""
+        if not data:
+            raise EOFError("telnet connection closed")
+        return strip_telnet_iac(data).decode("utf-8", errors="replace")
 
 
 def strip_telnet_iac(data: bytes) -> bytes:
@@ -789,6 +800,67 @@ def import_yate_log(args: argparse.Namespace) -> int:
     return 0
 
 
+def sniff_registers(args: argparse.Namespace) -> int:
+    db = init_db(args.db)
+    try:
+        conn = TelnetSocket(args.host, args.port, args.timeout)
+    except OSError as exc:
+        db.close()
+        print(f"ERROR: Yate is not reachable at {args.host}:{args.port}: {exc}", file=sys.stderr)
+        print("Check: sudo systemctl status yate.service", file=sys.stderr)
+        return 2
+
+    buffer = ""
+    parsed = 0
+    try:
+        conn.read_idle(idle_timeout=0.3, max_wait=1.5)
+        for command in ("sniffer on", "sniffer filter user.register", "output on"):
+            conn.write_line(command)
+            conn.read_idle(idle_timeout=0.2, max_wait=0.8)
+        print(f"Sniffing user.register on {args.host}:{args.port}; writing IMSI↔IMEI mappings to {args.db}")
+        print("Stop with Ctrl+C.")
+        while True:
+            chunk = conn.read_some(timeout=1.0)
+            if not chunk:
+                continue
+            buffer += chunk
+            lines = buffer.splitlines(keepends=True)
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                buffer = lines.pop()
+            else:
+                buffer = ""
+            mappings = parse_sniffer_registers(lines)
+            for ts, imsi, imei in mappings:
+                update_imsi_imei_map(db, ts, imsi, imei, "live-sniffer:user.register")
+                db.commit()
+                parsed += 1
+                print(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))} IMSI {imsi} -> IMEI {imei}")
+    except KeyboardInterrupt:
+        print(f"\nStopped. Imported {parsed} mappings.")
+        return 130
+    except EOFError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        db.close()
+        conn.close()
+
+
+def collect(args: argparse.Namespace) -> int:
+    interval = args.watch if args.watch > 0 else 5.0
+    sniffer = threading.Thread(target=sniff_registers, args=(args,), daemon=True)
+    sniffer.start()
+    print(f"Collecting SGSN snapshots every {interval:g}s into {args.db}")
+    print("Stop with Ctrl+C.")
+    try:
+        while True:
+            record_snapshot(args)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nStopped collector.")
+        return 130
+
+
 def pct(part: int | float | None, total: int | float | None) -> float:
     if not total:
         return 0.0
@@ -899,6 +971,10 @@ def write_html_report(args: argparse.Namespace) -> int:
 
 
 def once(args: argparse.Namespace) -> int:
+    if args.collect:
+        return collect(args)
+    if args.sniff_registers:
+        return sniff_registers(args)
     if args.import_yate_log or args.read_log_stdin:
         return import_yate_log(args)
     if args.report:
@@ -949,7 +1025,12 @@ def main() -> int:
     parser.add_argument("--since-hours", type=float, default=24.0, help="History window for reports")
     parser.add_argument("--import-yate-log", default="", help="Import Yate sniffer user.register log and map IMSI to IMEI")
     parser.add_argument("--read-log-stdin", action="store_true", help="Read Yate sniffer user.register log from stdin")
+    parser.add_argument("--sniff-registers", action="store_true", help="Continuously read telnet sniffer user.register and map IMSI to IMEI")
+    parser.add_argument("--collect", action="store_true", help="Run live IMEI sniffer and periodic SGSN recorder in one process")
     args = parser.parse_args()
+
+    if args.collect:
+        return collect(args)
 
     if args.watch <= 0:
         return once(args)
