@@ -746,37 +746,51 @@ def report_history(args: argparse.Namespace) -> int:
     return 0
 
 
-def parse_sniffer_registers(lines: Iterable[str]) -> list[tuple[int, str, str]]:
-    events: list[tuple[int, str, str]] = []
-    ts = int(time.time())
-    current: dict[str, str] = {}
-    in_register = False
-    for raw in lines:
-        line = raw.rstrip("\n")
+class SnifferRegisterParser:
+    def __init__(self) -> None:
+        self.ts = int(time.time())
+        self.current: dict[str, str] = {}
+        self.in_register = False
+
+    def feed(self, lines: Iterable[str]) -> list[tuple[int, str, str]]:
+        events: list[tuple[int, str, str]] = []
+        for raw in lines:
+            line = raw.rstrip("\r\n")
+            event = self.feed_line(line)
+            if event:
+                events.append(event)
+        return events
+
+    def feed_line(self, line: str) -> tuple[int, str, str] | None:
         stamp = re.match(r"(\d{4}-\d{2}-\d{2})[,_ ](\d{2}:\d{2}:\d{2})", line)
         if stamp:
             try:
-                ts = int(time.mktime(time.strptime(f"{stamp.group(1)} {stamp.group(2)}", "%Y-%m-%d %H:%M:%S")))
+                self.ts = int(time.mktime(time.strptime(f"{stamp.group(1)} {stamp.group(2)}", "%Y-%m-%d %H:%M:%S")))
             except ValueError:
-                ts = int(time.time())
+                self.ts = int(time.time())
         if "'user.register'" in line or "Message: user.register" in line:
-            in_register = True
-            current = {}
-            continue
-        if not in_register:
-            continue
+            self.in_register = True
+            self.current = {}
+            return None
+        if not self.in_register:
+            return None
         param = re.search(r"param\['([^']+)'\]\s*=\s*'([^']*)'", line)
         if param:
-            current[param.group(1)] = param.group(2)
-            if current.get("imsi") and current.get("imei"):
-                events.append((ts, current["imsi"], current["imei"]))
-                current = {}
-                in_register = False
-            continue
+            self.current[param.group(1)] = param.group(2)
+            if self.current.get("imsi") and self.current.get("imei"):
+                event = (self.ts, self.current["imsi"], self.current["imei"])
+                self.current = {}
+                self.in_register = False
+                return event
+            return None
         if line and not line.startswith((" ", "\t")):
-            in_register = False
-            current = {}
-    return events
+            self.in_register = False
+            self.current = {}
+        return None
+
+
+def parse_sniffer_registers(lines: Iterable[str]) -> list[tuple[int, str, str]]:
+    return SnifferRegisterParser().feed(lines)
 
 
 def import_yate_log(args: argparse.Namespace) -> int:
@@ -812,6 +826,7 @@ def sniff_registers(args: argparse.Namespace) -> int:
 
     buffer = ""
     parsed = 0
+    parser = SnifferRegisterParser()
     try:
         conn.read_idle(idle_timeout=0.3, max_wait=1.5)
         for command in ("sniffer on", "sniffer filter user.register", "output on"):
@@ -829,7 +844,7 @@ def sniff_registers(args: argparse.Namespace) -> int:
                 buffer = lines.pop()
             else:
                 buffer = ""
-            mappings = parse_sniffer_registers(lines)
+            mappings = parser.feed(lines)
             for ts, imsi, imei in mappings:
                 update_imsi_imei_map(db, ts, imsi, imei, "live-sniffer:user.register")
                 db.commit()
