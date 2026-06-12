@@ -867,26 +867,116 @@ def pct(part: int | float | None, total: int | float | None) -> float:
     return 100.0 * float(part or 0) / float(total)
 
 
+
+_HTML_CSS = (
+    "\n:root {\n"
+    "  --bg:       #07090c;\n"
+    "  --surface:  #0e1317;\n"
+    "  --card:     #141b22;\n"
+    "  --border:   #1e2d3a;\n"
+    "  --accent:   #00c8ff;\n"
+    "  --ok:       #22d46e;\n"
+    "  --idle:     #f5c842;\n"
+    "  --noip:     #f5902e;\n"
+    "  --down:     #e84040;\n"
+    "  --text:     #dce8f0;\n"
+    "  --muted:    #6b8090;\n"
+    "  --mono:     'JetBrains Mono', 'Fira Mono', monospace;\n"
+    "}\n"
+    "* { box-sizing: border-box; margin: 0; padding: 0; }\n"
+    "body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 28px 32px; min-height: 100vh; }\n"
+    "a { color: var(--accent); text-decoration: none; }\n"
+    ".page-header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 28px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }\n"
+    ".page-title { font-size: 20px; font-weight: 700; letter-spacing: -.3px; }\n"
+    ".page-meta  { font-size: 12px; color: var(--muted); font-family: var(--mono); }\n"
+    ".fleet { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }\n"
+    ".fleet-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 18px; min-width: 110px; }\n"
+    ".fleet-stat .val { font-size: 28px; font-weight: 700; font-family: var(--mono); line-height: 1; }\n"
+    ".fleet-stat .lbl { font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .06em; }\n"
+    ".val-ok { color: var(--ok); } .val-warn { color: var(--noip); } .val-crit { color: var(--down); } .val-blue { color: var(--accent); }\n"
+    ".legend { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }\n"
+    ".leg-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }\n"
+    ".leg-dot  { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }\n"
+    ".sort-bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }\n"
+    ".sort-bar span { font-size: 12px; color: var(--muted); margin-right: 4px; }\n"
+    ".sort-btn { background: var(--card); border: 1px solid var(--border); border-radius: 5px; color: var(--muted); font-size: 12px; padding: 4px 10px; cursor: pointer; transition: border-color .15s, color .15s; }\n"
+    ".sort-btn:hover, .sort-btn.active { border-color: var(--accent); color: var(--accent); }\n"
+    ".client { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }\n"
+    ".client.health-ok { border-left-color: var(--ok); } .client.health-warn { border-left-color: var(--noip); } .client.health-crit { border-left-color: var(--down); }\n"
+    ".client-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }\n"
+    ".client-id { font-family: var(--mono); font-size: 14px; font-weight: 600; }\n"
+    ".client-imsi { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }\n"
+    ".client-ip { font-size: 12px; color: var(--accent); font-family: var(--mono); font-weight: 600; flex-shrink: 0; }\n"
+    ".chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }\n"
+    ".chip { font-size: 11px; font-family: var(--mono); padding: 2px 8px; border-radius: 4px; background: var(--surface); border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }\n"
+    ".chip .cv { color: var(--text); font-weight: 600; }\n"
+    ".chip-ok { border-color: var(--ok); color: var(--ok); } .chip-warn { border-color: var(--noip); color: var(--noip); } .chip-crit { border-color: var(--down); color: var(--down); }\n"
+    ".bar-group { display: flex; gap: 10px; margin: 8px 0 4px; align-items: center; flex-wrap: wrap; }\n"
+    ".bar-row { display: flex; align-items: center; gap: 6px; }\n"
+    ".bar-lbl { font-size: 10px; color: var(--muted); width: 42px; text-align: right; }\n"
+    ".bar-track { width: 90px; height: 6px; background: var(--surface); border-radius: 3px; overflow: hidden; }\n"
+    ".bar-fill { height: 100%; border-radius: 3px; }\n"
+    ".bar-pct { font-size: 10px; color: var(--muted); font-family: var(--mono); width: 34px; }\n"
+    ".tl-wrap { margin: 10px 0 6px; }\n"
+    ".tl-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; }\n"
+    ".timeline { display: flex; gap: 1px; height: 18px; border-radius: 4px; overflow: hidden; }\n"
+    ".seg { flex: 1; min-width: 2px; cursor: default; }\n"
+    ".seg:hover { opacity: .75; }\n"
+    ".seg.ok { background: var(--ok); } .seg.idle { background: var(--idle); } .seg.noip { background: var(--noip); } .seg.down { background: var(--down); }\n"
+    "details { margin-top: 10px; }\n"
+    "summary { font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }\n"
+    "summary::before { content: '\u25b6'; font-size: 9px; transition: transform .15s; }\n"
+    "details[open] summary::before { transform: rotate(90deg); }\n"
+    ".evt-table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 8px; }\n"
+    ".evt-table th { background: var(--surface); color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border); }\n"
+    ".evt-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); font-family: var(--mono); color: var(--text); vertical-align: top; }\n"
+    ".evt-table tr:last-child td { border-bottom: none; }\n"
+    ".evt-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; background: var(--surface); border: 1px solid var(--border); }\n"
+    ".evt-MISSING { background: #3a1010; border-color: var(--down); color: var(--down); }\n"
+    ".evt-RETURNED { background: #0d2e18; border-color: var(--ok); color: var(--ok); }\n"
+    ".evt-LOST { background: #2d1e08; border-color: var(--noip); color: var(--noip); }\n"
+    ".evt-RESTORED { background: #0d2533; border-color: var(--accent); color: var(--accent); }\n"
+    ".evt-CHANGED { background: #2d1e08; border-color: var(--noip); color: var(--noip); }\n"
+    ".empty { text-align: center; padding: 60px 20px; color: var(--muted); }\n"
+)
+
+
+def _evt_badge_class(event: str) -> str:
+    e = event.upper()
+    if "MISSING" in e or "INACTIVE" in e:
+        return "evt-MISSING"
+    if "RETURNED" in e or "SEEN" in e:
+        return "evt-RETURNED"
+    if "LOST" in e:
+        return "evt-LOST"
+    if "RESTORED" in e:
+        return "evt-RESTORED"
+    if "CHANGED" in e:
+        return "evt-CHANGED"
+    return ""
+
+
+def _bar(pct_val: float, color: str) -> str:
+    return (
+        f"<div class='bar-track'>"
+        f"<div class='bar-fill' style='width:{pct_val:.1f}%;background:{color}'></div>"
+        f"</div>"
+        f"<span class='bar-pct'>{pct_val:.0f}%</span>"
+    )
+
+
 def write_html_report(args: argparse.Namespace) -> int:
     db = init_db(args.db)
     since = int(time.time() - args.since_hours * 3600)
     try:
         rows = db.execute(
-            """
-            SELECT ts, client_id, imsi, online, has_ip, radio_active, ip, state, idle, tlli
-            FROM client_samples
-            WHERE ts >= ?
-            ORDER BY client_id, ts
-            """,
+            "SELECT ts, client_id, imsi, online, has_ip, radio_active, ip, state, idle, tlli"
+            " FROM client_samples WHERE ts >= ? ORDER BY client_id, ts",
             (since,),
         ).fetchall()
         event_rows = db.execute(
-            """
-            SELECT ts, client_id, imsi, event, old_value, new_value
-            FROM client_events
-            WHERE ts >= ?
-            ORDER BY client_id, ts
-            """,
+            "SELECT ts, client_id, imsi, event, old_value, new_value"
+            " FROM client_events WHERE ts >= ? ORDER BY client_id, ts",
             (since,),
         ).fetchall()
     finally:
@@ -899,76 +989,224 @@ def write_html_report(args: argparse.Namespace) -> int:
     for row in event_rows:
         events.setdefault(row[1], []).append(row)
 
-    body = [
-        "<!doctype html><html><head><meta charset='utf-8'>",
-        "<title>YateBTS Client Stability</title>",
-        "<style>",
-        "body{font-family:Arial,sans-serif;background:#101418;color:#e7edf3;margin:24px}",
-        "h1{margin:0 0 8px}.muted{color:#9aa7b2}.client{background:#182029;border:1px solid #2c3945;border-radius:10px;padding:14px;margin:12px 0}",
-        ".timeline{display:flex;gap:1px;height:22px;margin:8px 0}.seg{flex:1;min-width:3px;border-radius:2px}",
-        ".ok{background:#34c759}.idle{background:#ffd60a}.noip{background:#ff9f0a}.down{background:#ff453a}",
-        "table{border-collapse:collapse;width:100%;font-size:13px}td,th{border-bottom:1px solid #2c3945;padding:4px 6px;text-align:left}",
-        ".pill{display:inline-block;padding:2px 7px;border-radius:999px;background:#273442;margin-right:6px}",
-        "</style></head><body>",
-        "<h1>YateBTS Client Stability</h1>",
-        f"<div class='muted'>Generated {html.escape(time.strftime('%Y-%m-%d %H:%M:%S'))}, window {args.since_hours:g}h</div>",
-        "<p><span class='pill' style='background:#34c759'>online+IP+radio</span><span class='pill' style='background:#ffd60a;color:#111'>online+IP idle</span><span class='pill' style='background:#ff9f0a;color:#111'>online no IP</span><span class='pill' style='background:#ff453a'>missing</span></p>",
-    ]
+    total_clients = len(by_client)
+    fleet_ok = fleet_warn = fleet_crit = 0
+    fleet_avg_up = fleet_avg_ip = 0.0
+    client_stats: list[dict] = []
 
-    if not by_client:
-        body.append("<p>No samples found.</p>")
-    for client_id, samples in sorted(by_client.items()):
-        ev = events.get(client_id, [])
-        drops = sum(1 for e in ev if e[3] == "CLIENT_MISSING")
-        ip_lost = sum(1 for e in ev if e[3] == "PDP_IP_LOST")
-        tlli_changes = sum(1 for e in ev if e[3] == "TLLI_CHANGED")
-        sim_switches = sum(1 for e in ev if e[3] == "SIM_SWITCHED")
-        imsis = sorted({s[2] for s in samples if s[2]})
-        online = sum(1 for s in samples if s[3])
-        ip_samples = sum(1 for s in samples if s[4])
-        radio = sum(1 for s in samples if s[5])
-        last = samples[-1]
-        body.append("<div class='client'>")
+    for client_id, samples in by_client.items():
+        ev         = events.get(client_id, [])
+        drops      = sum(1 for e in ev if e[3] == "CLIENT_MISSING")
+        ip_lost    = sum(1 for e in ev if e[3] == "PDP_IP_LOST")
+        tlli_chg   = sum(1 for e in ev if e[3] == "TLLI_CHANGED")
+        sim_sw     = sum(1 for e in ev if e[3] == "SIM_SWITCHED")
+        imsis      = sorted({s[2] for s in samples if s[2]})
+        online_cnt = sum(1 for s in samples if s[3])
+        ip_cnt     = sum(1 for s in samples if s[4])
+        radio_cnt  = sum(1 for s in samples if s[5])
+        n          = len(samples)
+        up_pct     = pct(online_cnt, n)
+        ip_pct     = pct(ip_cnt, n)
+        radio_pct  = pct(radio_cnt, n)
+        last       = samples[-1]
+        idles      = [s[8] for s in samples if s[8] is not None]
+        max_idle   = max(idles) if idles else None
+        avg_idle   = sum(idles) / len(idles) if idles else None
+
+        if drops >= 3 or up_pct < 50:
+            health = "crit"; fleet_crit += 1
+        elif drops >= 1 or up_pct < 90 or ip_pct < 80:
+            health = "warn"; fleet_warn += 1
+        else:
+            health = "ok"; fleet_ok += 1
+
+        fleet_avg_up += up_pct
+        fleet_avg_ip += ip_pct
+        client_stats.append(dict(
+            client_id=client_id, samples=samples, ev=ev,
+            drops=drops, ip_lost=ip_lost, tlli_chg=tlli_chg, sim_sw=sim_sw,
+            imsis=imsis, up_pct=up_pct, ip_pct=ip_pct, radio_pct=radio_pct,
+            last_ip=last[6] or "", last_state=last[7] or "", last_seen=last[0],
+            health=health, max_idle=max_idle, avg_idle=avg_idle, n=n,
+        ))
+
+    if total_clients:
+        fleet_avg_up /= total_clients
+        fleet_avg_ip /= total_clients
+
+    now_str = html.escape(time.strftime("%Y-%m-%d %H:%M:%S"))
+    body: list[str] = []
+    body.append(
+        "<!doctype html>\n<html lang='en'>\n<head>\n"
+        "<meta charset='utf-8'>\n"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>\n"
+        "<title>YateBTS \u00b7 GPRS Fleet Health</title>\n"
+        "<link rel='preconnect' href='https://fonts.googleapis.com'>\n"
+        "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700"
+        "&amp;family=JetBrains+Mono:wght@400;600&amp;display=swap' rel='stylesheet'>\n"
+        f"<style>{_HTML_CSS}</style>\n</head>\n<body>\n"
+    )
+    body.append(
+        f"<div class='page-header'>"
+        f"<span class='page-title'>GPRS Fleet Health</span>"
+        f"<span class='page-meta'>YateBTS \u00b7 generated {now_str}"
+        f" \u00b7 window {args.since_hours:g}h</span></div>\n"
+    )
+    # fleet summary
+    body.append("<div class='fleet'>")
+    body.append(f"<div class='fleet-stat'><div class='val val-blue'>{total_clients}</div><div class='lbl'>Devices</div></div>")
+    body.append(f"<div class='fleet-stat'><div class='val val-ok'>{fleet_ok}</div><div class='lbl'>Healthy</div></div>")
+    if fleet_warn:
+        body.append(f"<div class='fleet-stat'><div class='val val-warn'>{fleet_warn}</div><div class='lbl'>Warning</div></div>")
+    if fleet_crit:
+        body.append(f"<div class='fleet-stat'><div class='val val-crit'>{fleet_crit}</div><div class='lbl'>Critical</div></div>")
+    if total_clients:
+        body.append(f"<div class='fleet-stat'><div class='val' style='color:#aecde0'>{fleet_avg_up:.0f}%</div><div class='lbl'>Avg uptime</div></div>")
+        body.append(f"<div class='fleet-stat'><div class='val' style='color:#aecde0'>{fleet_avg_ip:.0f}%</div><div class='lbl'>Avg IP time</div></div>")
+        total_drops = sum(s["drops"] for s in client_stats)
+        dc = "val-crit" if total_drops else "val-ok"
+        body.append(f"<div class='fleet-stat'><div class='val {dc}'>{total_drops}</div><div class='lbl'>Total drops</div></div>")
+    body.append("</div>\n")
+    # legend
+    body.append(
+        "<div class='legend'>"
+        "<span class='leg-item'><span class='leg-dot' style='background:var(--ok)'></span>Online \u00b7 IP \u00b7 radio</span>"
+        "<span class='leg-item'><span class='leg-dot' style='background:var(--idle)'></span>Online \u00b7 IP \u00b7 idle</span>"
+        "<span class='leg-item'><span class='leg-dot' style='background:var(--noip)'></span>Online \u00b7 no IP</span>"
+        "<span class='leg-item'><span class='leg-dot' style='background:var(--down)'></span>Missing</span>"
+        "</div>\n"
+    )
+    # sort bar
+    body.append(
+        "<div class='sort-bar'><span>Sort by</span>"
+        "<button class='sort-btn active' onclick=\"sortCards('health')\">Health</button>"
+        "<button class='sort-btn' onclick=\"sortCards('up')\">Uptime</button>"
+        "<button class='sort-btn' onclick=\"sortCards('drops')\">Drops</button>"
+        "<button class='sort-btn' onclick=\"sortCards('id')\">Device ID</button>"
+        "</div>\n<div id='cards'>\n"
+    )
+    if not client_stats:
+        body.append("<div class='empty'><div>No samples in the selected time window.</div></div>")
+
+    for cs in sorted(client_stats, key=lambda x: ({"crit": 0, "warn": 1, "ok": 2}[x["health"]], -x["drops"])):
+        cid       = cs["client_id"]
+        h         = cs["health"]
+        up_pct    = cs["up_pct"]
+        ip_pct    = cs["ip_pct"]
+        radio_pct = cs["radio_pct"]
+        drops     = cs["drops"]
+        ip_lost   = cs["ip_lost"]
+        tlli_chg  = cs["tlli_chg"]
+        sim_sw    = cs["sim_sw"]
+        max_idle  = cs["max_idle"]
+        avg_idle  = cs["avg_idle"]
+        last_ip   = cs["last_ip"]
+        last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cs["last_seen"]))
+        imsis     = cs["imsis"]
+        n         = cs["n"]
+        h_order   = {"crit": 0, "warn": 1, "ok": 2}[h]
+
         body.append(
-            f"<h2>{html.escape(client_id)}</h2><div class='muted'>"
-            f"IMSIs {html.escape(', '.join(imsis) or '-')} | "
-            f"uptime {pct(online, len(samples)):.1f}% | ip {pct(ip_samples, len(samples)):.1f}% | "
-            f"radio {pct(radio, len(samples)):.1f}% | drops {drops} | ip_lost {ip_lost} | "
-            f"tlli_changes {tlli_changes} | sim_switches {sim_switches} | last_ip {html.escape(last[6] or '-')} | "
-            f"last_seen {html.escape(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last[0])))}"
-            "</div>"
+            f"<div class='client health-{h}' data-health='{h_order}'"
+            f" data-up='{up_pct:.1f}' data-drops='{drops}' data-id='{html.escape(cid)}'>\n"
         )
-        body.append("<div class='timeline'>")
-        for ts, _, imsi, online_v, has_ip, radio_active, ip, state, idle, tlli in samples:
+        body.append("<div class='client-head'>")
+        body.append(
+            f"<div><div class='client-id'>{html.escape(cid)}</div>"
+            f"<div class='client-imsi'>{html.escape(', '.join(imsis) or '\u2014')}</div></div>"
+        )
+        if last_ip:
+            body.append(f"<div class='client-ip'>{html.escape(last_ip)}</div>")
+        body.append(
+            f"<div style='margin-left:auto;font-size:11px;color:var(--muted)'>"
+            f"last seen {html.escape(last_seen)}</div></div>\n"
+        )
+        # chips
+        chip_drops_cls = "chip-crit" if drops >= 3 else ("chip-warn" if drops >= 1 else "")
+        chip_idle_cls  = "chip-warn" if (max_idle is not None and max_idle >= 300) else ""
+        chip_ip_cls    = "chip-warn" if ip_lost else ""
+        body.append("<div class='chips'>")
+        body.append(f"<span class='chip {chip_drops_cls}'>drops <span class='cv'>{drops}</span></span>")
+        body.append(f"<span class='chip {chip_ip_cls}'>ip_lost <span class='cv'>{ip_lost}</span></span>")
+        if tlli_chg:
+            body.append(f"<span class='chip'>tlli_chg <span class='cv'>{tlli_chg}</span></span>")
+        if sim_sw:
+            body.append(f"<span class='chip chip-warn'>sim_switch <span class='cv'>{sim_sw}</span></span>")
+        if max_idle is not None:
+            body.append(f"<span class='chip {chip_idle_cls}'>max_idle <span class='cv'>{max_idle}s</span></span>")
+        if avg_idle is not None:
+            body.append(f"<span class='chip'>avg_idle <span class='cv'>{avg_idle:.0f}s</span></span>")
+        body.append(f"<span class='chip'>samples <span class='cv'>{n}</span></span>")
+        body.append("</div>\n")
+        # bars
+        body.append("<div class='bar-group'>")
+        body.append(f"<div class='bar-row'><span class='bar-lbl'>uptime</span>{_bar(up_pct,'var(--ok)')}</div>")
+        body.append(f"<div class='bar-row'><span class='bar-lbl'>ip</span>{_bar(ip_pct,'var(--accent)')}</div>")
+        body.append(f"<div class='bar-row'><span class='bar-lbl'>radio</span>{_bar(radio_pct,'var(--idle)')}</div>")
+        body.append("</div>\n")
+        # timeline
+        body.append("<div class='tl-wrap'><div class='tl-label'>Timeline</div><div class='timeline'>")
+        for ts_s, _, imsi_s, online_v, has_ip_v, radio_v, ip_v, state_v, idle_v, tlli_v in cs["samples"]:
             if not online_v:
                 cls = "down"
-            elif not has_ip:
+            elif not has_ip_v:
                 cls = "noip"
-            elif not radio_active:
+            elif not radio_v:
                 cls = "idle"
             else:
                 cls = "ok"
-            title = f"{time.strftime('%H:%M:%S', time.localtime(ts))} imsi={imsi or '-'} ip={ip or '-'} state={state or '-'} idle={idle if idle is not None else '-'} tlli={tlli or '-'}"
+            t_str = time.strftime("%H:%M:%S", time.localtime(ts_s))
+            title = (
+                f"{t_str} imsi={imsi_s or '-'} ip={ip_v or '-'}"
+                f" state={state_v or '-'} idle={idle_v if idle_v is not None else '-'} tlli={tlli_v or '-'}"
+            )
             body.append(f"<span class='seg {cls}' title='{html.escape(title)}'></span>")
-        body.append("</div>")
+        body.append("</div></div>\n")
+        # events
+        ev = cs["ev"]
         if ev:
-            body.append("<table><tr><th>Time</th><th>Event</th><th>IMSI</th><th>Old</th><th>New</th></tr>")
-            for ts, _, imsi, event, old, new in ev[-20:]:
+            body.append(f"<details><summary>{len(ev)} events (last 30)</summary>")
+            body.append(
+                "<table class='evt-table'>"
+                "<tr><th>Time</th><th>Event</th><th>IMSI</th><th>Old</th><th>New</th></tr>"
+            )
+            for ts_e, _, imsi_e, event_e, old_e, new_e in ev[-30:]:
+                t_str = html.escape(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_e)))
+                badge_cls = _evt_badge_class(event_e)
                 body.append(
-                    "<tr>"
-                    f"<td>{html.escape(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)))}</td>"
-                    f"<td>{html.escape(event)}</td><td>{html.escape(imsi or '')}</td><td>{html.escape(old or '')}</td><td>{html.escape(new or '')}</td>"
-                    "</tr>"
+                    f"<tr><td>{t_str}</td>"
+                    f"<td><span class='evt-badge {badge_cls}'>{html.escape(event_e)}</span></td>"
+                    f"<td>{html.escape(imsi_e or '')}</td>"
+                    f"<td style='color:var(--muted)'>{html.escape(old_e or '')}</td>"
+                    f"<td>{html.escape(new_e or '')}</td></tr>"
                 )
-            body.append("</table>")
-        body.append("</div>")
-    body.append("</body></html>")
+            body.append("</table></details>\n")
+        body.append("</div>\n")
+
+    body.append("</div>\n")  # #cards
+    body.append(
+        "<script>\n"
+        "function sortCards(by){\n"
+        "  document.querySelectorAll('.sort-btn').forEach(function(b){b.classList.remove('active');});\n"
+        "  event.target.classList.add('active');\n"
+        "  var wrap=document.getElementById('cards');\n"
+        "  var cards=Array.prototype.slice.call(wrap.querySelectorAll('.client'));\n"
+        "  cards.sort(function(a,b){\n"
+        "    if(by==='health') return +a.dataset.health - +b.dataset.health;\n"
+        "    if(by==='up') return +a.dataset.up - +b.dataset.up;\n"
+        "    if(by==='drops') return +b.dataset.drops - +a.dataset.drops;\n"
+        "    if(by==='id') return a.dataset.id<b.dataset.id?-1:1;\n"
+        "    return 0;\n"
+        "  });\n"
+        "  cards.forEach(function(c){wrap.appendChild(c);});\n"
+        "}\n"
+        "</script>\n</body></html>"
+    )
 
     with open(args.html_report, "w", encoding="utf-8") as f:
         f.write("\n".join(body))
     print(f"Wrote {args.html_report}")
     return 0
-
 
 def once(args: argparse.Namespace) -> int:
     if args.collect:
