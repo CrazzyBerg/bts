@@ -1103,6 +1103,7 @@ def write_html_report(args: argparse.Namespace) -> int:
         last_ip   = cs["last_ip"]
         last_seen = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(cs["last_seen"]))
         imsis     = cs["imsis"]
+        imsis_text = html.escape(", ".join(imsis) or "—")
         n         = cs["n"]
         h_order   = {"crit": 0, "warn": 1, "ok": 2}[h]
 
@@ -1113,7 +1114,7 @@ def write_html_report(args: argparse.Namespace) -> int:
         body.append("<div class='client-head'>")
         body.append(
             f"<div><div class='client-id'>{html.escape(cid)}</div>"
-            f"<div class='client-imsi'>{html.escape(', '.join(imsis) or '\u2014')}</div></div>"
+            f"<div class='client-imsi'>{imsis_text}</div></div>"
         )
         if last_ip:
             body.append(f"<div class='client-ip'>{html.escape(last_ip)}</div>")
