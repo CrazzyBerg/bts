@@ -705,7 +705,7 @@ class App(BaseHTTPRequestHandler):
 
 
 INDEX_HTML = r"""<!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -846,6 +846,84 @@ INDEX_HTML = r"""<!doctype html>
       gap: 8px;
       align-items: center;
     }
+    .app-tabs {
+      display: flex;
+      align-items: flex-end;
+      gap: 4px;
+      border-bottom: 1px solid var(--line);
+      min-width: 240px;
+    }
+    .app-tab {
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      min-height: 38px;
+      padding: 7px 14px;
+    }
+    .app-tab.active {
+      background: var(--bg);
+      color: var(--text);
+      border-color: var(--line);
+      border-bottom-color: var(--bg);
+      margin-bottom: -1px;
+    }
+    .tab-view[hidden] { display: none; }
+    .node-tabs {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      padding: 10px 14px 0;
+      border-bottom: 1px solid var(--line);
+      overflow-x: auto;
+      background: #f8fafc;
+    }
+    .node-tab {
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+      border-color: #cfd6df;
+      background: #edf1f5;
+      color: #3b4653;
+      min-width: 150px;
+      max-width: 230px;
+      justify-content: flex-start;
+      text-align: left;
+      margin-bottom: -1px;
+    }
+    .node-tab.active {
+      background: var(--panel);
+      color: var(--text);
+      border-bottom-color: var(--panel);
+      box-shadow: 0 -1px 2px rgba(20, 30, 44, .05);
+    }
+    .node-tab-title,
+    .node-tab-meta {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      line-height: 1.2;
+    }
+    .node-tab-meta {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      margin-top: 2px;
+    }
+    .node-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: var(--muted);
+      vertical-align: 1px;
+    }
+    .empty-state {
+      padding: 18px 14px;
+      color: var(--muted);
+    }
     .status {
       color: var(--muted);
       font-size: 12px;
@@ -882,6 +960,8 @@ INDEX_HTML = r"""<!doctype html>
     .ok { color: #0f6842; background: #e8f7ef; border-color: #bfe8d2; }
     .bad { color: #9e2222; background: #fdecec; border-color: #f5c1c1; }
     .warn { color: #804d00; background: #fff4df; border-color: #f2d69c; }
+    .node-dot.ok { background: var(--green); border-color: transparent; }
+    .node-dot.bad { background: var(--red); border-color: transparent; }
     .muted { color: var(--muted); }
     .terminal {
       min-height: 220px;
@@ -927,6 +1007,8 @@ INDEX_HTML = r"""<!doctype html>
     }
     @media (max-width: 640px) {
       .bar, main { padding-left: 10px; padding-right: 10px; }
+      .bar { align-items: flex-start; flex-direction: column; }
+      .app-tabs { width: 100%; }
       .grid { grid-template-columns: 1fr; }
       th:nth-child(4), td:nth-child(4),
       th:nth-child(5), td:nth-child(5) { display: none; }
@@ -940,164 +1022,177 @@ INDEX_HTML = r"""<!doctype html>
   <header>
     <div class="bar">
       <h1>BTS Cluster</h1>
+      <div class="app-tabs" role="tablist" aria-label="Main navigation">
+        <button class="app-tab active" data-view="add" role="tab" aria-selected="true">Add / Discover</button>
+        <button class="app-tab" data-view="work" role="tab" aria-selected="false">Work</button>
+      </div>
       <div class="toolbar">
         <span id="sshpassState" class="status">sshpass: ...</span>
-        <button id="refreshBtn">Обновить</button>
+        <button id="refreshBtn">Refresh</button>
       </div>
     </div>
   </header>
 
   <main>
-    <section>
-      <div class="section-head">
-        <h2>Сканирование подсети</h2>
-        <span id="scanState" class="status"></span>
-      </div>
-      <div class="content">
-        <div class="grid">
-          <label>CIDR
-            <input id="scanCidr" placeholder="192.168.1.0/24">
-          </label>
-          <label>SSH login
-            <input id="scanUser" value="pi">
-          </label>
-          <label>SSH password
-            <input id="scanPassword" type="password" value="raspberry">
-          </label>
-          <label>SSH port
-            <input id="scanSshPort" type="number" value="22" min="1" max="65535">
-          </label>
-          <label>Telnet port
-            <input id="scanTelnetPort" type="number" value="5038" min="1" max="65535">
-          </label>
-          <label class="checkbox-line">
-            <input id="scanAutoAdd" type="checkbox" checked>
-            Добавлять найденные
-          </label>
-        </div>
-        <div class="toolbar" style="margin-top: 10px">
-          <button id="scanBtn" class="primary">Сканировать</button>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <div class="section-head">
-        <h2>Ручное добавление</h2>
-        <span id="addState" class="status"></span>
-      </div>
-      <div class="content">
-        <div class="grid">
-          <label>Название
-            <input id="addName" placeholder="bts-1">
-          </label>
-          <label>IP
-            <input id="addIp" placeholder="192.168.1.50">
-          </label>
-          <label>SSH login
-            <input id="addUser" value="pi">
-          </label>
-          <label>SSH password
-            <input id="addPassword" type="password" value="raspberry">
-          </label>
-          <label>Service
-            <input id="addService" value="yate.service">
-          </label>
-          <div class="toolbar">
-            <button id="addBtn" class="primary">Добавить</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <div class="split">
+    <div id="addView" class="tab-view">
       <section>
         <div class="section-head">
-          <h2>Узлы</h2>
-          <span id="nodeState" class="status"></span>
+          <h2>Subnet Discovery</h2>
+          <span id="scanState" class="status"></span>
         </div>
-        <div class="content" style="padding: 0">
-          <table>
-            <thead>
-              <tr>
-                <th style="width: 20%">Имя</th>
-                <th style="width: 16%">IP</th>
-                <th style="width: 15%">Online</th>
-                <th style="width: 14%">Yate</th>
-                <th style="width: 17%">Доступ</th>
-                <th style="width: 18%">Действия</th>
-              </tr>
-            </thead>
-            <tbody id="nodesBody"></tbody>
-          </table>
+        <div class="content">
+          <div class="grid">
+            <label>CIDR
+              <input id="scanCidr" placeholder="192.168.1.0/24">
+            </label>
+            <label>SSH login
+              <input id="scanUser" value="pi">
+            </label>
+            <label>SSH password
+              <input id="scanPassword" type="password" value="raspberry">
+            </label>
+            <label>SSH port
+              <input id="scanSshPort" type="number" value="22" min="1" max="65535">
+            </label>
+            <label>Telnet port
+              <input id="scanTelnetPort" type="number" value="5038" min="1" max="65535">
+            </label>
+            <label class="checkbox-line">
+              <input id="scanAutoAdd" type="checkbox" checked>
+              Auto-add discovered nodes
+            </label>
+          </div>
+          <div class="toolbar" style="margin-top: 10px">
+            <button id="scanBtn" class="primary">Scan subnet</button>
+          </div>
         </div>
       </section>
 
       <section>
         <div class="section-head">
-          <h2>Service</h2>
-          <span id="actionState" class="status"></span>
+          <h2>Manual Add</h2>
+          <span id="addState" class="status"></span>
         </div>
         <div class="content">
-          <div id="selectedNode" class="muted">Узел не выбран</div>
-          <div class="toolbar" style="margin-top: 12px">
-            <button data-action="start">Start</button>
-            <button data-action="restart" class="primary">Restart</button>
-            <button data-action="stop" class="danger">Stop</button>
+          <div class="grid">
+            <label>Name
+              <input id="addName" placeholder="bts-1">
+            </label>
+            <label>IP
+              <input id="addIp" placeholder="192.168.1.50">
+            </label>
+            <label>SSH login
+              <input id="addUser" value="pi">
+            </label>
+            <label>SSH password
+              <input id="addPassword" type="password" value="raspberry">
+            </label>
+            <label>Service
+              <input id="addService" value="yate.service">
+            </label>
+            <div class="toolbar">
+              <button id="addBtn" class="primary">Add node</button>
+            </div>
           </div>
         </div>
       </section>
     </div>
 
-    <section>
-      <div class="section-head">
-        <h2>Логи</h2>
-        <span id="logState" class="status"></span>
-      </div>
-      <div class="content">
-        <div class="grid">
-          <label>Файл
-            <input id="logPath" value="/var/log/yate.err">
-          </label>
-          <label>Последние строки
-            <input id="logLines" type="number" value="200" min="0" max="2000">
-          </label>
-          <label class="checkbox-line">
-            <input id="logSudo" type="checkbox">
-            Читать через sudo
-          </label>
-          <div class="toolbar">
-            <button id="startLogBtn" class="primary">Start tail</button>
-            <button id="stopLogBtn">Stop</button>
-            <button id="clearLogBtn">Очистить</button>
-          </div>
-        </div>
-        <div id="logTerminal" class="terminal" style="margin-top: 12px"></div>
-      </div>
-    </section>
+    <div id="workView" class="tab-view" hidden>
+      <section>
+        <div id="nodeTabs" class="node-tabs"></div>
+        <div id="nodeEmpty" class="empty-state" hidden>No nodes yet. Open Add / Discover to add one.</div>
+      </section>
 
-    <section>
-      <div class="section-head">
-        <h2>Telnet команды</h2>
-        <span id="telnetState" class="status"></span>
-      </div>
-      <div class="content split">
-        <div>
-          <label>Команда
-            <input id="telnetCommand" value="mbts sgsn list">
-          </label>
-          <div class="toolbar" style="margin: 10px 0">
-            <button id="sendTelnetBtn" class="primary">Отправить</button>
-            <button id="clearOutputBtn">Очистить</button>
+      <div class="split">
+        <section>
+          <div class="section-head">
+            <h2>Node Overview</h2>
+            <span id="nodeState" class="status"></span>
           </div>
-          <div id="terminal" class="terminal"></div>
-        </div>
-        <div>
-          <h2 style="margin-bottom: 6px">Шаблоны</h2>
-          <div id="templates"></div>
-        </div>
+          <div class="content" style="padding: 0">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 20%">Name</th>
+                  <th style="width: 16%">IP</th>
+                  <th style="width: 15%">Online</th>
+                  <th style="width: 14%">Yate</th>
+                  <th style="width: 17%">Access</th>
+                  <th style="width: 18%">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="nodesBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section>
+          <div class="section-head">
+            <h2>Service</h2>
+            <span id="actionState" class="status"></span>
+          </div>
+          <div class="content">
+            <div id="selectedNode" class="muted">No node selected</div>
+            <div class="toolbar" style="margin-top: 12px">
+              <button data-action="start">Start</button>
+              <button data-action="restart" class="primary">Restart</button>
+              <button data-action="stop" class="danger">Stop</button>
+            </div>
+          </div>
+        </section>
       </div>
-    </section>
+
+      <section>
+        <div class="section-head">
+          <h2>Logs</h2>
+          <span id="logState" class="status"></span>
+        </div>
+        <div class="content">
+          <div class="grid">
+            <label>File
+              <input id="logPath" value="/var/log/yate.err">
+            </label>
+            <label>Last lines
+              <input id="logLines" type="number" value="200" min="0" max="2000">
+            </label>
+            <label class="checkbox-line">
+              <input id="logSudo" type="checkbox">
+              Read through sudo
+            </label>
+            <div class="toolbar">
+              <button id="startLogBtn" class="primary">Start tail</button>
+              <button id="stopLogBtn">Stop</button>
+              <button id="clearLogBtn">Clear</button>
+            </div>
+          </div>
+          <div id="logTerminal" class="terminal" style="margin-top: 12px"></div>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>Telnet Commands</h2>
+          <span id="telnetState" class="status"></span>
+        </div>
+        <div class="content split">
+          <div>
+            <label>Command
+              <input id="telnetCommand" value="mbts sgsn list">
+            </label>
+            <div class="toolbar" style="margin: 10px 0">
+              <button id="sendTelnetBtn" class="primary">Send</button>
+              <button id="clearOutputBtn">Clear</button>
+            </div>
+            <div id="terminal" class="terminal"></div>
+          </div>
+          <div>
+            <h2 style="margin-bottom: 6px">Templates</h2>
+            <div id="templates"></div>
+          </div>
+        </div>
+      </section>
+    </div>
   </main>
 
   <script>
@@ -1125,10 +1220,46 @@ INDEX_HTML = r"""<!doctype html>
       return `<span class="pill ${kind}">${esc(text)}</span>`;
     }
 
+    function showView(name) {
+      document.querySelectorAll(".tab-view").forEach((view) => {
+        view.hidden = view.id !== `${name}View`;
+      });
+      document.querySelectorAll(".app-tab").forEach((tab) => {
+        const active = tab.dataset.view === name;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", active ? "true" : "false");
+      });
+    }
+
+    function renderNodeTabs() {
+      const tabs = $("nodeTabs");
+      const empty = $("nodeEmpty");
+      if (!state.nodes.length) {
+        tabs.innerHTML = "";
+        empty.hidden = false;
+        return;
+      }
+      empty.hidden = true;
+      tabs.innerHTML = state.nodes.map((node) => {
+        const live = node.live || {};
+        const dot = live.online ? "ok" : "bad";
+        const label = node.name || node.ip;
+        return `
+          <button class="node-tab ${node.id === state.selectedId ? "active" : ""}" data-node-tab="${esc(node.id)}">
+            <span class="node-tab-title"><span class="node-dot ${dot}"></span>${esc(label)}</span>
+            <span class="node-tab-meta">${esc(node.ip)} · ${esc(live.service || "unknown")}</span>
+          </button>
+        `;
+      }).join("");
+      tabs.querySelectorAll("[data-node-tab]").forEach((btn) => {
+        btn.addEventListener("click", () => selectNode(btn.dataset.nodeTab));
+      });
+    }
+
     function renderNodes() {
       const body = $("nodesBody");
       if (!state.nodes.length) {
-        body.innerHTML = `<tr><td colspan="6" class="muted">Нет узлов</td></tr>`;
+        body.innerHTML = `<tr><td colspan="6" class="muted">No nodes yet</td></tr>`;
         return;
       }
       body.innerHTML = state.nodes.map((node) => {
@@ -1150,8 +1281,8 @@ INDEX_HTML = r"""<!doctype html>
             <td>${auth}<div class="muted">${esc(live.auth_error || "")}</div></td>
             <td>
               <div class="toolbar">
-                <button data-select="${esc(node.id)}">Выбрать</button>
-                <button data-delete="${esc(node.id)}">Удалить</button>
+                <button data-select="${esc(node.id)}">Focus</button>
+                <button data-delete="${esc(node.id)}">Delete</button>
               </div>
             </td>
           </tr>
@@ -1172,7 +1303,8 @@ INDEX_HTML = r"""<!doctype html>
       const node = state.nodes.find((item) => item.id === state.selectedId);
       $("selectedNode").innerHTML = node
         ? `<strong>${esc(node.name)}</strong> <span class="muted">${esc(node.ip)} / ${esc(node.service)}</span>`
-        : "Узел не выбран";
+        : "No node selected";
+      renderNodeTabs();
       renderNodes();
     }
 
@@ -1185,12 +1317,12 @@ INDEX_HTML = r"""<!doctype html>
     async function loadConfig() {
       const data = await api("/api/config");
       $("scanCidr").value = data.default_cidr;
-      $("sshpassState").textContent = data.sshpass ? "sshpass: ok" : "sshpass: нет";
+      $("sshpassState").textContent = data.sshpass ? "sshpass: ok" : "sshpass: missing";
       state.templates = data.templates || [];
       $("templates").innerHTML = state.templates.map((tpl) => `
         <div class="template-row">
           <div><strong>${esc(tpl.name)}</strong><div class="muted">${esc(tpl.command)}</div></div>
-          <button data-template="${esc(tpl.command)}">Вставить</button>
+          <button data-template="${esc(tpl.command)}">Insert</button>
         </div>
       `).join("");
       $("templates").querySelectorAll("[data-template]").forEach((btn) => {
@@ -1199,20 +1331,20 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     async function loadNodes() {
-      $("nodeState").textContent = "проверка...";
+      $("nodeState").textContent = "checking...";
       const data = await api("/api/nodes");
       state.nodes = data.nodes || [];
       if (state.selectedId && !state.nodes.some((node) => node.id === state.selectedId)) {
         state.selectedId = null;
       }
       if (!state.selectedId && state.nodes.length) state.selectedId = state.nodes[0].id;
-      $("nodeState").textContent = `${state.nodes.length} узл.`;
+      $("nodeState").textContent = `${state.nodes.length} node${state.nodes.length === 1 ? "" : "s"}`;
       renderSelected();
     }
 
     async function scan() {
       $("scanBtn").disabled = true;
-      $("scanState").textContent = "сканирование...";
+      $("scanState").textContent = "scanning...";
       try {
         const data = await api("/api/scan", {
           method: "POST",
@@ -1225,7 +1357,7 @@ INDEX_HTML = r"""<!doctype html>
             auto_add: $("scanAutoAdd").checked
           }
         });
-        $("scanState").textContent = `найдено: ${(data.discoveries || []).length}`;
+        $("scanState").textContent = `found: ${(data.discoveries || []).length}`;
         await loadNodes();
       } catch (err) {
         $("scanState").textContent = err.message;
@@ -1235,7 +1367,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     async function addNode() {
-      $("addState").textContent = "добавление...";
+      $("addState").textContent = "adding...";
       try {
         const data = await api("/api/nodes", {
           method: "POST",
@@ -1248,8 +1380,9 @@ INDEX_HTML = r"""<!doctype html>
           }
         });
         state.selectedId = data.node.id;
-        $("addState").textContent = "готово";
+        $("addState").textContent = "saved";
         await loadNodes();
+        showView("work");
       } catch (err) {
         $("addState").textContent = err.message;
       }
@@ -1264,7 +1397,7 @@ INDEX_HTML = r"""<!doctype html>
     async function serviceAction(action) {
       const node = state.nodes.find((item) => item.id === state.selectedId);
       if (!node) {
-        $("actionState").textContent = "выберите узел";
+        $("actionState").textContent = "select a node";
         return;
       }
       $("actionState").textContent = `${action}...`;
@@ -1274,7 +1407,7 @@ INDEX_HTML = r"""<!doctype html>
           body: { action }
         });
         const result = data.result || {};
-        $("actionState").textContent = result.ok ? "готово" : `ошибка rc=${result.rc}`;
+        $("actionState").textContent = result.ok ? "done" : `error rc=${result.rc}`;
         writeOutput(`$ systemctl ${action} ${node.service}\n${result.stdout || ""}${result.stderr || ""}\n`);
         await loadNodes();
       } catch (err) {
@@ -1299,13 +1432,13 @@ INDEX_HTML = r"""<!doctype html>
         state.logSource.close();
         state.logSource = null;
       }
-      if (updateStatus) $("logState").textContent = "остановлено";
+      if (updateStatus) $("logState").textContent = "stopped";
     }
 
     function startLogTail() {
       const node = state.nodes.find((item) => item.id === state.selectedId);
       if (!node) {
-        $("logState").textContent = "выберите узел";
+        $("logState").textContent = "select a node";
         return;
       }
       stopLogTail(false);
@@ -1317,11 +1450,11 @@ INDEX_HTML = r"""<!doctype html>
       const url = `/api/nodes/${encodeURIComponent(node.id)}/logs/stream?${params.toString()}`;
       const source = new EventSource(url);
       state.logSource = source;
-      $("logState").textContent = `читаю ${node.name}`;
+      $("logState").textContent = `reading ${node.name}`;
       writeLogOutput(`\n[${node.name} ${node.ip}] tail -F ${$("logPath").value || "/var/log/yate.err"}\n`);
       source.addEventListener("status", (event) => {
         const data = JSON.parse(event.data);
-        $("logState").textContent = data.message || "подключено";
+        $("logState").textContent = data.message || "connected";
       });
       source.addEventListener("line", (event) => {
         const data = JSON.parse(event.data);
@@ -1329,7 +1462,7 @@ INDEX_HTML = r"""<!doctype html>
       });
       source.addEventListener("exit", (event) => {
         const data = JSON.parse(event.data);
-        $("logState").textContent = `tail завершен rc=${data.rc}`;
+        $("logState").textContent = `tail exited rc=${data.rc}`;
         stopLogTail(false);
       });
       source.addEventListener("logerror", (event) => {
@@ -1339,11 +1472,11 @@ INDEX_HTML = r"""<!doctype html>
             writeLogOutput(`ERROR: ${data.message}\n`);
           } catch (_) {}
         }
-        $("logState").textContent = "ошибка чтения";
+        $("logState").textContent = "read error";
         stopLogTail(false);
       });
       source.onerror = () => {
-        $("logState").textContent = "соединение с логом закрыто";
+        $("logState").textContent = "log stream closed";
         stopLogTail(false);
       };
     }
@@ -1351,17 +1484,17 @@ INDEX_HTML = r"""<!doctype html>
     async function sendTelnet() {
       const node = state.nodes.find((item) => item.id === state.selectedId);
       if (!node) {
-        $("telnetState").textContent = "выберите узел";
+        $("telnetState").textContent = "select a node";
         return;
       }
       const command = $("telnetCommand").value;
-      $("telnetState").textContent = "отправка...";
+      $("telnetState").textContent = "sending...";
       try {
         const data = await api(`/api/nodes/${encodeURIComponent(node.id)}/telnet`, {
           method: "POST",
           body: { command }
         });
-        $("telnetState").textContent = data.ok ? "готово" : "ошибка";
+        $("telnetState").textContent = data.ok ? "done" : "error";
         writeOutput(`\n[${node.name} ${node.ip}] $ ${command}\n${data.output || data.error || ""}\n`);
       } catch (err) {
         $("telnetState").textContent = err.message;
@@ -1376,6 +1509,9 @@ INDEX_HTML = r"""<!doctype html>
     $("startLogBtn").addEventListener("click", startLogTail);
     $("stopLogBtn").addEventListener("click", () => stopLogTail(true));
     $("clearLogBtn").addEventListener("click", () => { $("logTerminal").textContent = ""; });
+    document.querySelectorAll(".app-tab").forEach((tab) => {
+      tab.addEventListener("click", () => showView(tab.dataset.view));
+    });
     document.querySelectorAll("[data-action]").forEach((btn) => {
       btn.addEventListener("click", () => serviceAction(btn.dataset.action));
     });
