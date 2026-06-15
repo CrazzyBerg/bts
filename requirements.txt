@@ -1,0 +1,4 @@
+# BTS cluster web UI uses only the Python standard library at runtime.
+#
+# Optional system package for password-based SSH automation:
+#   sshpass
