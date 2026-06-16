@@ -81,6 +81,21 @@ class ValidationTest(unittest.TestCase):
         )
         self.assertEqual(parsed["service"], "active")
 
+    def test_parse_service_status_reads_ybts_radio_and_ms_ip_values(self) -> None:
+        parsed = server.parse_service_status_stdout(
+            "hostname=pi-bts\n"
+            "service=active\n"
+            "Radio.Band=900\n"
+            "Radio.C0=62\n"
+            ";MS.IP.Base=192.168.99.1\n"
+            ";MS.IP.MaxCount=254\n"
+        )
+
+        self.assertEqual(parsed["radio_band"], "900")
+        self.assertEqual(parsed["radio_c0"], "62")
+        self.assertEqual(parsed["ms_ip_base"], "192.168.99.1")
+        self.assertEqual(parsed["ms_ip_max_count"], "254")
+
     def test_validate_node_uniqueness_rejects_duplicate_ip(self) -> None:
         existing = server.Node(id="n1", name="bts-1", ip="192.168.1.10")
         candidate = server.Node(id="n2", name="bts-2", ip="192.168.1.10")
@@ -151,6 +166,22 @@ class ValidationTest(unittest.TestCase):
         )
 
         server.validate_node_uniqueness([existing], candidate)
+
+    def test_node_with_live_config_fills_empty_inventory_fields(self) -> None:
+        node = server.Node(id="n1", name="bts-1", ip="192.168.1.10")
+        live = {
+            "radio_band": "900",
+            "radio_c0": "62",
+            "ms_ip_base": "192.168.99.1",
+            "ms_ip_max_count": "254",
+        }
+
+        effective = server.node_with_live_config(node, live)
+
+        self.assertEqual(effective.radio_band, "900")
+        self.assertEqual(effective.radio_c0, "62")
+        self.assertEqual(effective.ms_ip_base, "192.168.99.1")
+        self.assertEqual(effective.ms_ip_max_count, "254")
 
 
 class CommandBuildTest(unittest.TestCase):

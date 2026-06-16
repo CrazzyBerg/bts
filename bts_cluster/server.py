@@ -41,6 +41,7 @@ DEFAULT_TELNET_PORT = 5038
 DEFAULT_SERVICE = "yate.service"
 RMANAGER_CONF_PATH = "/usr/local/etc/yate/rmanager.conf"
 RMANAGER_BIND_ADDR = "0.0.0.0"
+YBTS_CONF_PATH = "/usr/local/etc/yate/ybts.conf"
 MAX_SCAN_HOSTS = 1024
 
 IAC = 255
@@ -53,6 +54,9 @@ SE = 240
 
 SERVICE_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+YBTS_CONFIG_RE = re.compile(
+    r"^\s*;?\s*(Radio\.Band|Radio\.C0|MS\.IP\.Base|MS\.IP\.MaxCount)\s*=\s*([^;#\r\n]*)"
+)
 
 TELNET_TEMPLATES = [
     {"name": "SGSN clients", "command": "mbts sgsn list"},
@@ -197,6 +201,28 @@ def ip_ranges_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
     return left[0] <= right[1] and right[0] <= left[1]
 
 
+def parse_ybts_config_text(text: str) -> dict[str, str]:
+    parsed = {
+        "radio_band": "",
+        "radio_c0": "",
+        "ms_ip_base": "",
+        "ms_ip_max_count": "",
+    }
+    key_map = {
+        "Radio.Band": "radio_band",
+        "Radio.C0": "radio_c0",
+        "MS.IP.Base": "ms_ip_base",
+        "MS.IP.MaxCount": "ms_ip_max_count",
+    }
+    for line in text.splitlines():
+        match = YBTS_CONFIG_RE.match(line)
+        if not match:
+            continue
+        key, value = match.groups()
+        parsed[key_map[key]] = value.strip()
+    return parsed
+
+
 def validate_node_uniqueness(nodes: list[Node], candidate: Node) -> None:
     candidate_ms_range = ms_ip_range(candidate)
     for node in nodes:
@@ -236,6 +262,15 @@ def inventory_conflicts(nodes: list[Node]) -> dict[str, list[str]]:
                 conflicts[left.id].append(message)
                 conflicts[right.id].append(message)
     return conflicts
+
+
+def node_with_live_config(node: Node, live: dict[str, Any] | None) -> Node:
+    data = asdict(node)
+    if live:
+        for field in ("radio_band", "radio_c0", "ms_ip_base", "ms_ip_max_count"):
+            if not data.get(field) and live.get(field):
+                data[field] = str(live[field])
+    return Node(**data)
 
 
 def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -535,6 +570,7 @@ def parse_service_status_stdout(stdout: str) -> dict[str, str]:
         "yate_pid": "",
         "yate_cmd_pid": "",
     }
+    ybts = parse_ybts_config_text(stdout)
     for line in stdout.splitlines():
         key, sep, value = line.partition("=")
         if sep and key in values:
@@ -556,19 +592,22 @@ def parse_service_status_stdout(stdout: str) -> dict[str, str]:
         "main_pid": values["main_pid"],
         "yate_pid": values["yate_pid"],
         "yate_cmd_pid": values["yate_cmd_pid"],
+        **ybts,
     }
 
 
 def service_status(node: Node) -> dict[str, Any]:
     service = shlex.quote(node.service)
+    ybts_conf = shlex.quote(YBTS_CONF_PATH)
     command = (
-        "printf 'hostname='; hostname 2>/dev/null || true; "
-        "printf 'yate_pid='; pgrep -x yate 2>/dev/null | head -n 1 || true; "
-        "printf 'yate_cmd_pid='; pgrep -f '(^|/)(lt-)?yate([[:space:]]|$)|/usr/local/bin/yate' 2>/dev/null | head -n 1 || true; "
-        f"printf 'service='; systemctl is-active {service} 2>/dev/null || true; "
-        f"printf 'active_state='; systemctl show -p ActiveState --value {service} 2>/dev/null || true; "
-        f"printf 'substate='; systemctl show -p SubState --value {service} 2>/dev/null || true; "
-        f"printf 'main_pid='; systemctl show -p MainPID --value {service} 2>/dev/null || true"
+        "printf 'hostname='; hostname 2>/dev/null || true; printf '\\n'; "
+        "printf 'yate_pid='; pgrep -x yate 2>/dev/null | head -n 1 || true; printf '\\n'; "
+        "printf 'yate_cmd_pid='; pgrep -f '(^|/)(lt-)?yate([[:space:]]|$)|/usr/local/bin/yate' 2>/dev/null | head -n 1 || true; printf '\\n'; "
+        f"printf 'service='; systemctl is-active {service} 2>/dev/null || true; printf '\\n'; "
+        f"printf 'active_state='; systemctl show -p ActiveState --value {service} 2>/dev/null || true; printf '\\n'; "
+        f"printf 'substate='; systemctl show -p SubState --value {service} 2>/dev/null || true; printf '\\n'; "
+        f"printf 'main_pid='; systemctl show -p MainPID --value {service} 2>/dev/null || true; printf '\\n'; "
+        f"sed -n '/^[[:space:]]*;\\?[[:space:]]*\\(Radio\\.Band\\|Radio\\.C0\\|MS\\.IP\\.Base\\|MS\\.IP\\.MaxCount\\)[[:space:]]*=/p' {ybts_conf} 2>/dev/null || true"
     )
     result = run_ssh(node, command, timeout=10, batch=not bool(node.password))
     parsed = parse_service_status_stdout(result["stdout"])
@@ -595,6 +634,10 @@ def probe_node(node: Node, verify_auth: bool = True, timeout: float = 1.2) -> di
             info["auth_ok"] = bool(status["ssh"]["ok"])
             info["hostname"] = status["hostname"]
             info["service"] = status["service"]
+            info["radio_band"] = status.get("radio_band", "")
+            info["radio_c0"] = status.get("radio_c0", "")
+            info["ms_ip_base"] = status.get("ms_ip_base", "")
+            info["ms_ip_max_count"] = status.get("ms_ip_max_count", "")
             if info["service"] == "unknown" and telnet_open:
                 info["service"] = "active"
             if not status["ssh"]["ok"]:
@@ -707,6 +750,10 @@ def upsert_discovered(discoveries: list[dict[str, Any]], user: str, password: st
                 ip=ip,
                 user=user,
                 password=password,
+                radio_band=str(item.get("radio_band") or ""),
+                radio_c0=str(item.get("radio_c0") or ""),
+                ms_ip_base=str(item.get("ms_ip_base") or ""),
+                ms_ip_max_count=str(item.get("ms_ip_max_count") or ""),
                 created_at=ts,
                 updated_at=ts,
             )
@@ -718,6 +765,9 @@ def upsert_discovered(discoveries: list[dict[str, Any]], user: str, password: st
             node.updated_at = ts
             if item.get("hostname"):
                 node.name = item["hostname"]
+            for field in ("radio_band", "radio_c0", "ms_ip_base", "ms_ip_max_count"):
+                if not getattr(node, field) and item.get(field):
+                    setattr(node, field, str(item[field]))
     save_nodes(nodes)
     return nodes
 
@@ -770,7 +820,8 @@ class App(BaseHTTPRequestHandler):
                     futures = {executor.submit(probe_node, node, True): node.id for node in nodes}
                     for future in concurrent.futures.as_completed(futures):
                         live_by_id[futures[future]] = future.result()
-            conflicts_by_id = inventory_conflicts(nodes)
+            conflict_nodes = [node_with_live_config(node, live_by_id.get(node.id)) for node in nodes]
+            conflicts_by_id = inventory_conflicts(conflict_nodes)
             json_response(
                 self,
                 HTTPStatus.OK,
@@ -1811,6 +1862,11 @@ INDEX_HTML = r"""<!doctype html>
       return "yate.service active";
     }
 
+    function effectiveNodeValue(node, field) {
+      const live = node.live || {};
+      return node[field] || live[field] || "";
+    }
+
     function renderStats() {
       const total = state.nodes.length;
       const online = state.nodes.filter((node) => node.live?.online).length;
@@ -1837,8 +1893,12 @@ INDEX_HTML = r"""<!doctype html>
         const kind = statusKind(node);
         const pulse = kind === "ok" ? "" : kind;
         const label = statusLabel(node);
-        const radio = node.radio_band && node.radio_c0 ? `${node.radio_band} / C0 ${node.radio_c0}` : "radio unset";
-        const msPool = node.ms_ip_base && node.ms_ip_max_count ? `MS ${node.ms_ip_base} x${node.ms_ip_max_count}` : "MS pool unset";
+        const radioBand = effectiveNodeValue(node, "radio_band");
+        const radioC0 = effectiveNodeValue(node, "radio_c0");
+        const msIpBase = effectiveNodeValue(node, "ms_ip_base");
+        const msIpMaxCount = effectiveNodeValue(node, "ms_ip_max_count");
+        const radio = radioBand && radioC0 ? `${radioBand} / C0 ${radioC0}` : "radio unset";
+        const msPool = msIpBase && msIpMaxCount ? `MS ${msIpBase} x${msIpMaxCount}` : "MS pool unset";
         const conflicts = node.conflicts || [];
         const serviceBadge = live.service === "active"
           ? `<span class="badge ssh">active</span>`
@@ -1888,6 +1948,10 @@ INDEX_HTML = r"""<!doctype html>
       const telClass = live.telnet_open ? "ok" : "warn";
       const svcClass = live.service === "active" ? "ok" : live.service === "unknown" ? "warn" : "bad";
       const conflicts = node.conflicts || [];
+      const radioBand = effectiveNodeValue(node, "radio_band");
+      const radioC0 = effectiveNodeValue(node, "radio_c0");
+      const msIpBase = effectiveNodeValue(node, "ms_ip_base");
+      const msIpMaxCount = effectiveNodeValue(node, "ms_ip_max_count");
       $("selectedNodeState").textContent = `${node.ip}:${node.telnet_port}`;
       info.innerHTML = `
         <div><div class="info-label">IP address</div><div class="info-val">${esc(node.ip)}</div></div>
@@ -1896,10 +1960,10 @@ INDEX_HTML = r"""<!doctype html>
         <div><div class="info-label">Yate telnet</div><div class="info-val ${telClass}">:${esc(node.telnet_port)} ${live.telnet_open ? "open" : "closed"}</div></div>
         <div><div class="info-label">Service</div><div class="info-val ${svcClass}">${esc(live.service || "unknown")}</div></div>
         <div><div class="info-label">Credentials</div><div class="info-val">${esc(node.user)} / ${node.has_password ? "stored" : "key"}</div></div>
-        <div><div class="info-label">Radio.Band</div><div class="info-val">${esc(node.radio_band || "-")}</div></div>
-        <div><div class="info-label">Radio.C0</div><div class="info-val">${esc(node.radio_c0 || "-")}</div></div>
-        <div><div class="info-label">MS.IP.Base</div><div class="info-val">${esc(node.ms_ip_base || "-")}</div></div>
-        <div><div class="info-label">MS.IP.MaxCount</div><div class="info-val">${esc(node.ms_ip_max_count || "-")}</div></div>
+        <div><div class="info-label">Radio.Band</div><div class="info-val">${esc(radioBand || "-")}</div></div>
+        <div><div class="info-label">Radio.C0</div><div class="info-val">${esc(radioC0 || "-")}</div></div>
+        <div><div class="info-label">MS.IP.Base</div><div class="info-val">${esc(msIpBase || "-")}</div></div>
+        <div><div class="info-label">MS.IP.MaxCount</div><div class="info-val">${esc(msIpMaxCount || "-")}</div></div>
         <div style="grid-column: 1 / -1"><div class="info-label">Conflicts</div><div class="info-val ${conflicts.length ? "bad" : "ok"}">${esc(conflicts.join("; ") || "none")}</div></div>
       `;
     }
