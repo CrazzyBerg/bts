@@ -23,6 +23,7 @@ http://127.0.0.1:8097/
   is installed;
 - add nodes manually by IP;
 - start, restart, or stop `yate.service` over SSH;
+- set Yate rmanager `addr=0.0.0.0` on a node without changing the telnet port;
 - send custom Yate telnet/rmanager commands;
 - use built-in telnet command templates.
 - continuously stream remote logs with `tail -F`, for example

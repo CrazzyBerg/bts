@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import errno
 import html
 import ipaddress
 import json
@@ -38,6 +39,8 @@ DEFAULT_PASSWORD = "raspberry"
 DEFAULT_SSH_PORT = 22
 DEFAULT_TELNET_PORT = 5038
 DEFAULT_SERVICE = "yate.service"
+RMANAGER_CONF_PATH = "/usr/local/etc/yate/rmanager.conf"
+RMANAGER_BIND_ADDR = "0.0.0.0"
 MAX_SCAN_HOSTS = 1024
 
 IAC = 255
@@ -307,18 +310,79 @@ def run_ssh(node: Node, remote_command: str, timeout: int = 12, batch: bool = Fa
     }
 
 
+def sudo_shell_command(node: Node, command: str) -> str:
+    if node.password:
+        return f"printf '%s\\n' {shlex.quote(node.password)} | sudo -S -p '' sh -c {shlex.quote(command)}"
+    return f"sudo -n sh -c {shlex.quote(command)}"
+
+
 def run_service_action(node: Node, action: str) -> dict[str, Any]:
     if action not in {"start", "restart", "stop"}:
         raise ValueError("Unsupported service action")
     if not SERVICE_RE.match(node.service):
         raise ValueError("Invalid service name")
     service = node.service
-    if node.password:
-        password = node.password.replace("'", "'\"'\"'")
-        remote = f"printf '%s\\n' '{password}' | sudo -S -p '' systemctl {action} {service}"
-    else:
-        remote = f"sudo -n systemctl {action} {service}"
+    remote = sudo_shell_command(node, f"systemctl {action} {service}")
     return run_ssh(node, remote, timeout=25)
+
+
+def rmanager_addr_update_script() -> str:
+    return r"""
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+addr = sys.argv[2]
+section_re = re.compile(r"^\s*\[([^]]+)]")
+addr_re = re.compile(r"^\s*;?\s*addr\s*=")
+
+lines = path.read_text().splitlines() if path.exists() else []
+general_start = None
+general_end = len(lines)
+
+for idx, line in enumerate(lines):
+    match = section_re.match(line)
+    if not match:
+        continue
+    if general_start is not None:
+        general_end = idx
+        break
+    if match.group(1).strip().lower() == "general":
+        general_start = idx
+
+if general_start is None:
+    lines = ["[general]", f"addr={addr}", "", *lines]
+else:
+    changed = False
+    for idx in range(general_start + 1, general_end):
+        if addr_re.match(lines[idx]):
+            lines[idx] = f"addr={addr}"
+            changed = True
+            break
+    if not changed:
+        lines.insert(general_start + 1, f"addr={addr}")
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text("\n".join(lines).rstrip() + "\n")
+""".strip()
+
+
+def run_configure_rmanager_addr(node: Node) -> dict[str, Any]:
+    if not SERVICE_RE.match(node.service):
+        raise ValueError("Invalid service name")
+    script = rmanager_addr_update_script()
+    python_command = " ".join(
+        [
+            "python3",
+            "-c",
+            shlex.quote(script),
+            shlex.quote(RMANAGER_CONF_PATH),
+            shlex.quote(RMANAGER_BIND_ADDR),
+        ]
+    )
+    remote = sudo_shell_command(node, f"{python_command} && systemctl restart {node.service}")
+    return run_ssh(node, remote, timeout=30)
 
 
 def validate_log_path(value: str) -> str:
@@ -396,6 +460,20 @@ def compact_error(value: str) -> str:
     if not lines:
         return ""
     return lines[-1][:240]
+
+
+def telnet_error_message(exc: OSError, ip: str, port: int) -> str:
+    endpoint = f"{ip}:{port}"
+    if isinstance(exc, socket.timeout) or exc.errno == errno.ETIMEDOUT:
+        return f"Telnet connection to {endpoint} timed out. Check network reachability and firewall rules."
+    if isinstance(exc, ConnectionRefusedError) or exc.errno == errno.ECONNREFUSED:
+        return (
+            f"Telnet connection refused by {endpoint}. "
+            "Yate rmanager is not listening there. Check yate.service, rmanager.conf, and the node telnet port."
+        )
+    if exc.errno in {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN, errno.ENETDOWN}:
+        return f"Telnet endpoint {endpoint} is unreachable. Check the node IP address and network route."
+    return f"Telnet connection to {endpoint} failed: {exc}"
 
 
 def scan_host(ip: str, user: str, password: str, ssh_port: int, telnet_port: int, timeout: float) -> dict[str, Any] | None:
@@ -624,7 +702,10 @@ class App(BaseHTTPRequestHandler):
             error_response(self, HTTPStatus.NOT_FOUND, "Unknown node")
             return
         action = str(payload.get("action") or "")
-        result = run_service_action(node, action)
+        if action == "configure-rmanager-addr":
+            result = run_configure_rmanager_addr(node)
+        else:
+            result = run_service_action(node, action)
         live = probe_node(node, verify_auth=True)
         json_response(self, HTTPStatus.OK, {"ok": result["ok"], "result": result, "live": live})
 
@@ -638,7 +719,11 @@ class App(BaseHTTPRequestHandler):
         try:
             result = run_telnet(node.ip, node.telnet_port, command)
         except OSError as exc:
-            json_response(self, HTTPStatus.OK, {"ok": False, "output": "", "error": str(exc)})
+            json_response(
+                self,
+                HTTPStatus.OK,
+                {"ok": False, "output": "", "error": telnet_error_message(exc, node.ip, node.telnet_port)},
+            )
             return
         json_response(self, HTTPStatus.OK, result)
 
@@ -713,132 +798,251 @@ INDEX_HTML = r"""<!doctype html>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f6f7f9;
+      --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --bg: #eef1f4;
+      --surface: #f7f8fa;
       --panel: #ffffff;
-      --text: #1e2329;
-      --muted: #667080;
-      --line: #dfe4ea;
-      --blue: #2563eb;
-      --green: #168354;
-      --red: #c73535;
-      --amber: #a76705;
-      --shadow: 0 1px 3px rgba(20, 30, 44, .08);
+      --panel-alt: #f3f5f7;
+      --text: #1b2128;
+      --muted: #66717f;
+      --subtle: #98a2af;
+      --line: #dce2e8;
+      --line-strong: #c6ced7;
+      --info-bg: #e9f1ff;
+      --info-text: #1e5bb8;
+      --info-line: #b9d0fb;
+      --ok-bg: #e8f7ef;
+      --ok-text: #0f6842;
+      --ok-line: #bce5cf;
+      --warn-bg: #fff4df;
+      --warn-text: #875400;
+      --warn-line: #edcf95;
+      --bad-bg: #fdecec;
+      --bad-text: #9e2222;
+      --bad-line: #efb9b9;
+      --terminal-bg: #0d1117;
+      --terminal-panel: #161b22;
+      --terminal-line: #30363d;
+      --terminal-text: #e6edf3;
+      --terminal-muted: #8b949e;
+      --terminal-blue: #58a6ff;
+      --shadow: 0 1px 3px rgba(20, 30, 44, .07);
+      --radius: 6px;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       background: var(--bg);
       color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: var(--font-sans);
       font-size: 14px;
       letter-spacing: 0;
     }
-    header {
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-      position: sticky;
-      top: 0;
-      z-index: 4;
-    }
-    .bar {
-      max-width: 1280px;
-      margin: 0 auto;
-      min-height: 58px;
-      padding: 10px 18px;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      justify-content: space-between;
-    }
-    h1 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 700;
-    }
-    main {
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 18px;
-      display: grid;
-      gap: 16px;
-    }
-    section {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-    }
-    .section-head {
-      min-height: 48px;
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    h2 {
-      margin: 0;
-      font-size: 15px;
-      font-weight: 700;
-    }
-    .content { padding: 14px; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
-      gap: 10px;
-      align-items: end;
-    }
-    label {
-      color: var(--muted);
-      display: grid;
-      gap: 5px;
-      font-size: 12px;
-      font-weight: 650;
-    }
-    input, select, textarea {
-      width: 100%;
-      border: 1px solid #cfd6df;
-      border-radius: 6px;
-      background: #fff;
-      color: var(--text);
+    button, input {
       font: inherit;
-      padding: 8px 9px;
-      min-height: 36px;
     }
-    textarea {
-      min-height: 128px;
-      resize: vertical;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    input[type="checkbox"] { width: auto; min-height: 0; }
     button {
-      border: 1px solid #b9c2ce;
-      background: #fff;
+      border: .5px solid var(--line-strong);
+      background: var(--panel);
       color: var(--text);
-      border-radius: 6px;
-      min-height: 36px;
-      padding: 7px 11px;
-      font: inherit;
-      font-weight: 650;
+      border-radius: var(--radius);
+      min-height: 32px;
+      padding: 6px 11px;
+      font-size: 12px;
+      font-weight: 600;
       cursor: pointer;
       white-space: nowrap;
     }
     button.primary {
-      background: var(--blue);
-      color: #fff;
-      border-color: var(--blue);
+      background: var(--info-bg);
+      color: var(--info-text);
+      border-color: var(--info-line);
     }
     button.danger {
-      color: #fff;
-      background: var(--red);
-      border-color: var(--red);
+      background: var(--bad-bg);
+      color: var(--bad-text);
+      border-color: var(--bad-line);
     }
     button:disabled {
       opacity: .55;
       cursor: not-allowed;
+    }
+    input {
+      width: 100%;
+      min-height: 32px;
+      border: .5px solid var(--line);
+      border-radius: 4px;
+      background: var(--panel-alt);
+      color: var(--text);
+      padding: 6px 9px;
+      font-size: 12px;
+    }
+    input[type="checkbox"] {
+      width: auto;
+      min-height: 0;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .bts-root {
+      min-height: 100vh;
+      background: var(--surface);
+    }
+    .bts-header {
+      min-height: 58px;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--panel);
+      border-bottom: .5px solid var(--line);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .bts-logo {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+    .bts-signal-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: var(--radius);
+      background: var(--info-bg);
+      border: .5px solid var(--info-line);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--info-text);
+      font-family: var(--font-mono);
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .bts-logo-text {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.15;
+    }
+    .bts-logo-sub {
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: .5px;
+      margin-top: 2px;
+    }
+    .bts-header-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .bts-subnet-pill {
+      color: var(--muted);
+      background: var(--panel-alt);
+      border: .5px solid var(--line);
+      border-radius: 20px;
+      padding: 4px 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .bts-header .app-tab.active {
+      background: var(--info-bg);
+      color: var(--info-text);
+      border-color: var(--info-line);
+    }
+    .bts-body {
+      display: grid;
+      grid-template-columns: 224px minmax(0, 1fr);
+      min-height: calc(100vh - 58px);
+    }
+    .bts-sidebar {
+      background: var(--panel);
+      border-right: .5px solid var(--line);
+      padding: 16px 0;
+    }
+    .bts-sidebar-section {
+      padding: 0 14px;
+      margin-bottom: 18px;
+    }
+    .bts-sidebar-label {
+      color: var(--subtle);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .8px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .bts-nav-item {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: var(--radius);
+      color: var(--muted);
+      background: transparent;
+      border: 0;
+      text-align: left;
+      min-height: 32px;
+      justify-content: flex-start;
+      margin-bottom: 2px;
+    }
+    .bts-nav-item.active {
+      background: var(--info-bg);
+      color: var(--info-text);
+    }
+    .bts-divider {
+      border: 0;
+      border-top: .5px solid var(--line);
+      margin: 12px 0;
+    }
+    .bts-main {
+      min-width: 0;
+      padding: 18px 20px;
+    }
+    .tab-view[hidden] {
+      display: none;
+    }
+    .dashboard-grid {
+      display: grid;
+      gap: 14px;
+    }
+    .section-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .panel {
+      background: var(--panel);
+      border: .5px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel-head {
+      min-height: 39px;
+      padding: 10px 14px;
+      border-bottom: .5px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .panel-body {
+      padding: 12px 14px;
     }
     .toolbar {
       display: flex;
@@ -846,354 +1050,533 @@ INDEX_HTML = r"""<!doctype html>
       gap: 8px;
       align-items: center;
     }
-    .app-tabs {
-      display: flex;
-      align-items: flex-end;
-      gap: 4px;
-      border-bottom: 1px solid var(--line);
-      min-width: 240px;
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      align-items: end;
     }
-    .app-tab {
-      border-bottom-left-radius: 0;
-      border-bottom-right-radius: 0;
-      border-color: transparent;
-      background: transparent;
-      color: var(--muted);
-      min-height: 38px;
-      padding: 7px 14px;
-    }
-    .app-tab.active {
-      background: var(--bg);
-      color: var(--text);
-      border-color: var(--line);
-      border-bottom-color: var(--bg);
-      margin-bottom: -1px;
-    }
-    .tab-view[hidden] { display: none; }
-    .node-tabs {
-      display: flex;
-      align-items: flex-end;
-      gap: 3px;
-      padding: 10px 14px 0;
-      border-bottom: 1px solid var(--line);
-      overflow-x: auto;
-      background: #f8fafc;
-    }
-    .node-tab {
-      border-bottom-left-radius: 0;
-      border-bottom-right-radius: 0;
-      border-color: #cfd6df;
-      background: #edf1f5;
-      color: #3b4653;
-      min-width: 150px;
-      max-width: 230px;
-      justify-content: flex-start;
-      text-align: left;
-      margin-bottom: -1px;
-    }
-    .node-tab.active {
+    .scan-bar {
       background: var(--panel);
-      color: var(--text);
-      border-bottom-color: var(--panel);
-      box-shadow: 0 -1px 2px rgba(20, 30, 44, .05);
+      border: .5px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      display: grid;
+      grid-template-columns: auto 1fr auto auto auto auto;
+      gap: 10px;
+      align-items: center;
     }
-    .node-tab-title,
-    .node-tab-meta {
-      display: block;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .scan-label {
+      font-size: 11px;
+      color: var(--muted);
       white-space: nowrap;
-      line-height: 1.2;
     }
-    .node-tab-meta {
+    .checkbox-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 32px;
       color: var(--muted);
       font-size: 11px;
       font-weight: 600;
+    }
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .stat-card {
+      background: var(--panel);
+      border: .5px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+    }
+    .stat-label {
+      color: var(--subtle);
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+    .stat-val {
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 22px;
+      line-height: 1;
+      font-weight: 600;
+    }
+    .stat-val.ok { color: var(--ok-text); }
+    .stat-val.warn { color: var(--warn-text); }
+    .stat-val.bad { color: var(--bad-text); }
+    .node-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .node-card {
+      background: var(--panel);
+      border: .5px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      display: grid;
+      grid-template-columns: 10px minmax(130px, 1fr) auto auto;
+      gap: 12px;
+      align-items: center;
+      cursor: pointer;
+    }
+    .node-card:hover {
+      border-color: var(--line-strong);
+    }
+    .node-card.selected {
+      border-color: var(--info-line);
+      background: #fbfdff;
+    }
+    .pulse-wrap {
+      position: relative;
+      width: 10px;
+      height: 10px;
+    }
+    .pulse-dot,
+    .pulse-ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: var(--ok-text);
+    }
+    .pulse-ring {
+      animation: pulse-ring 2s ease-out infinite;
+      opacity: 0;
+    }
+    .pulse-dot.warn,
+    .pulse-ring.warn { background: var(--warn-text); }
+    .pulse-dot.dead,
+    .pulse-ring.dead { background: var(--bad-text); }
+    @keyframes pulse-ring {
+      0% { transform: scale(1); opacity: .5; }
+      100% { transform: scale(2.8); opacity: 0; }
+    }
+    .node-ip {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .node-name {
+      font-size: 11px;
+      color: var(--muted);
       margin-top: 2px;
     }
-    .node-dot {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 6px;
-      background: var(--muted);
-      vertical-align: 1px;
+    .node-badges {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .badge,
+    .pill {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: .5px solid var(--line);
+      color: var(--muted);
+      background: var(--panel-alt);
+    }
+    .badge.ssh,
+    .pill.ok,
+    button.ok { color: var(--ok-text); border-color: var(--ok-line); background: var(--ok-bg); }
+    .badge.tel,
+    .pill.info,
+    button.info { color: var(--info-text); border-color: var(--info-line); background: var(--info-bg); }
+    .badge.bad,
+    .pill.bad { color: var(--bad-text); border-color: var(--bad-line); background: var(--bad-bg); }
+    .badge.warn,
+    .pill.warn { color: var(--warn-text); border-color: var(--warn-line); background: var(--warn-bg); }
+    .info-val.ok { color: var(--ok-text); }
+    .info-val.info { color: var(--info-text); }
+    .info-val.bad { color: var(--bad-text); }
+    .info-val.warn { color: var(--warn-text); }
+    .node-actions {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+    }
+    .icon-btn {
+      width: 25px;
+      min-width: 25px;
+      height: 25px;
+      min-height: 25px;
+      padding: 0;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .info-label {
+      color: var(--subtle);
+      font-size: 10px;
+      margin-bottom: 2px;
+    }
+    .info-val {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text);
+      font-weight: 600;
+      overflow-wrap: anywhere;
+    }
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .action-grid button {
+      min-height: 50px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
     }
     .empty-state {
-      padding: 18px 14px;
+      padding: 18px;
       color: var(--muted);
+      border: .5px dashed var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
     }
     .status {
       color: var(--muted);
       font-size: 12px;
     }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-    }
-    th, td {
-      border-bottom: 1px solid var(--line);
-      text-align: left;
-      padding: 9px 8px;
-      vertical-align: middle;
-      overflow-wrap: anywhere;
-    }
-    th {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 750;
-      background: #fbfcfd;
-    }
-    tr.selected { background: #eef5ff; }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 12px;
-      font-weight: 750;
-      border: 1px solid transparent;
-    }
-    .ok { color: #0f6842; background: #e8f7ef; border-color: #bfe8d2; }
-    .bad { color: #9e2222; background: #fdecec; border-color: #f5c1c1; }
-    .warn { color: #804d00; background: #fff4df; border-color: #f2d69c; }
-    .node-dot.ok { background: var(--green); border-color: transparent; }
-    .node-dot.bad { background: var(--red); border-color: transparent; }
     .muted { color: var(--muted); }
     .terminal {
-      min-height: 220px;
+      min-height: 210px;
       max-height: 420px;
       overflow: auto;
       padding: 12px;
-      background: #101419;
-      color: #d8e2ed;
-      border-radius: 6px;
+      background: var(--terminal-bg);
+      color: var(--terminal-text);
+      border-radius: 0 0 var(--radius) var(--radius);
       white-space: pre-wrap;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.45;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.6;
     }
-    .split {
+    .terminal.short {
+      min-height: 155px;
+    }
+    .cmd-bar {
+      border-top: .5px solid var(--terminal-line);
+      padding: 6px 10px;
+      background: var(--terminal-panel);
       display: grid;
-      grid-template-columns: 1.15fr .85fr;
-      gap: 16px;
-      align-items: start;
+      grid-template-columns: auto 1fr auto auto;
+      gap: 6px;
+      align-items: center;
+    }
+    .cmd-bar input {
+      background: transparent;
+      border: 0;
+      outline: 0;
+      color: var(--terminal-text);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      min-height: 26px;
+      padding: 2px 4px;
     }
     .template-row {
       display: grid;
       grid-template-columns: 1fr auto;
       gap: 8px;
       align-items: center;
-      padding: 8px 0;
-      border-bottom: 1px solid var(--line);
+      padding: 7px 0;
+      border-bottom: .5px solid var(--line);
+      font-size: 11px;
     }
     .template-row:last-child { border-bottom: 0; }
-    .checkbox-line {
-      min-height: 36px;
+    .scan-progress-wrap {
+      background: var(--panel-alt);
+      border: .5px solid var(--line);
+      border-radius: 4px;
+      height: 4px;
+      overflow: hidden;
+      margin-bottom: 7px;
+    }
+    .scan-progress-bar {
+      height: 100%;
+      width: 0;
+      border-radius: 4px;
+      background: var(--info-text);
+      transition: width .35s ease;
+    }
+    .scan-progress-bar.scanning {
+      animation: scan-fill 1.1s ease-in-out infinite alternate;
+    }
+    @keyframes scan-fill {
+      from { width: 15%; }
+      to { width: 100%; }
+    }
+    .scan-progress-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--subtle);
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .scan-grid {
+      display: grid;
+      grid-template-columns: repeat(16, minmax(0, 1fr));
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+    .scan-cell {
+      aspect-ratio: 1;
+      border-radius: 3px;
+      background: var(--panel-alt);
+      border: .5px solid var(--line);
+      opacity: .5;
+    }
+    .scan-cell.active {
+      background: var(--info-bg);
+      border-color: var(--info-line);
+      opacity: 1;
+    }
+    .scan-cell.found {
+      background: var(--ok-bg);
+      border-color: var(--ok-line);
+      opacity: 1;
+    }
+    .scan-results {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .scan-result-row {
       display: flex;
       align-items: center;
       gap: 8px;
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 650;
+      padding: 7px 10px;
+      background: var(--panel);
+      border: .5px solid var(--line);
+      border-radius: 5px;
+      font-size: 11px;
     }
-    @media (max-width: 980px) {
-      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .split { grid-template-columns: 1fr; }
-      table { table-layout: auto; }
+    @media (max-width: 1120px) {
+      .bts-body { grid-template-columns: 1fr; }
+      .bts-sidebar { display: none; }
+      .detail-grid { grid-template-columns: 1fr; }
+      .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .scan-bar { grid-template-columns: 1fr 1fr; }
     }
-    @media (max-width: 640px) {
-      .bar, main { padding-left: 10px; padding-right: 10px; }
-      .bar { align-items: flex-start; flex-direction: column; }
-      .app-tabs { width: 100%; }
-      .grid { grid-template-columns: 1fr; }
-      th:nth-child(4), td:nth-child(4),
-      th:nth-child(5), td:nth-child(5) { display: none; }
-      .section-head { align-items: flex-start; flex-direction: column; }
-      .toolbar { width: 100%; }
+    @media (max-width: 720px) {
+      .bts-header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .bts-header-right {
+        width: 100%;
+        margin-left: 0;
+        flex-wrap: wrap;
+      }
+      .bts-main { padding: 12px; }
+      .stats-row,
+      .form-grid,
+      .scan-bar,
+      .action-grid,
+      .info-grid { grid-template-columns: 1fr; }
+      .node-card { grid-template-columns: 10px 1fr; }
+      .node-badges,
+      .node-actions { justify-content: flex-start; grid-column: 2; }
       button { white-space: normal; }
     }
   </style>
 </head>
 <body>
-  <header>
-    <div class="bar">
-      <h1>BTS Cluster</h1>
-      <div class="app-tabs" role="tablist" aria-label="Main navigation">
-        <button class="app-tab active" data-view="add" role="tab" aria-selected="true">Add / Discover</button>
-        <button class="app-tab" data-view="work" role="tab" aria-selected="false">Work</button>
+  <div class="bts-root">
+    <header class="bts-header">
+      <div class="bts-logo">
+        <div class="bts-signal-icon">B</div>
+        <div>
+          <div class="bts-logo-text">BTS Cluster</div>
+          <div class="bts-logo-sub">YateBTS · Node Manager</div>
+        </div>
       </div>
-      <div class="toolbar">
+      <div class="bts-header-right">
+        <div id="headerSubnet" class="bts-subnet-pill">subnet: ...</div>
         <span id="sshpassState" class="status">sshpass: ...</span>
         <button id="refreshBtn">Refresh</button>
+        <button class="app-tab active" data-view="add" role="tab" aria-selected="true">Scan / Add</button>
+        <button class="app-tab" data-view="work" role="tab" aria-selected="false">Dashboard</button>
       </div>
-    </div>
-  </header>
+    </header>
 
-  <main>
-    <div id="addView" class="tab-view">
-      <section>
-        <div class="section-head">
-          <h2>Subnet Discovery</h2>
-          <span id="scanState" class="status"></span>
+    <div class="bts-body">
+      <aside class="bts-sidebar">
+        <div class="bts-sidebar-section">
+          <div class="bts-sidebar-label">Navigation</div>
+          <button class="bts-nav-item active app-tab" data-view="add" role="tab" aria-selected="true">Scan / Add</button>
+          <button class="bts-nav-item app-tab" data-view="work" role="tab" aria-selected="false">Nodes</button>
+          <button class="bts-nav-item" data-focus-panel="console">Telnet console</button>
+          <button class="bts-nav-item" data-focus-panel="logs">Live logs</button>
         </div>
-        <div class="content">
-          <div class="grid">
-            <label>CIDR
-              <input id="scanCidr" placeholder="192.168.1.0/24">
-            </label>
-            <label>SSH login
-              <input id="scanUser" value="pi">
-            </label>
-            <label>SSH password
-              <input id="scanPassword" type="password" value="raspberry">
-            </label>
-            <label>SSH port
-              <input id="scanSshPort" type="number" value="22" min="1" max="65535">
-            </label>
-            <label>Telnet port
-              <input id="scanTelnetPort" type="number" value="5038" min="1" max="65535">
-            </label>
-            <label class="checkbox-line">
-              <input id="scanAutoAdd" type="checkbox" checked>
-              Auto-add discovered nodes
-            </label>
-          </div>
-          <div class="toolbar" style="margin-top: 10px">
-            <button id="scanBtn" class="primary">Scan subnet</button>
-          </div>
+        <hr class="bts-divider">
+        <div class="bts-sidebar-section">
+          <div class="bts-sidebar-label">Selected node</div>
+          <div id="selectedNode" class="muted">No node selected</div>
         </div>
-      </section>
+      </aside>
 
-      <section>
-        <div class="section-head">
-          <h2>Manual Add</h2>
-          <span id="addState" class="status"></span>
-        </div>
-        <div class="content">
-          <div class="grid">
-            <label>Name
-              <input id="addName" placeholder="bts-1">
-            </label>
-            <label>IP
-              <input id="addIp" placeholder="192.168.1.50">
-            </label>
-            <label>SSH login
-              <input id="addUser" value="pi">
-            </label>
-            <label>SSH password
-              <input id="addPassword" type="password" value="raspberry">
-            </label>
-            <label>Service
-              <input id="addService" value="yate.service">
-            </label>
-            <div class="toolbar">
-              <button id="addBtn" class="primary">Add node</button>
+      <main class="bts-main">
+        <div id="addView" class="tab-view dashboard-grid">
+          <div class="panel">
+            <div class="panel-head">
+              <span>Subnet scan</span>
+              <span id="scanState" class="status"></span>
+            </div>
+            <div class="panel-body">
+              <div class="scan-bar">
+                <span class="scan-label">CIDR</span>
+                <input id="scanCidr" placeholder="192.168.1.0/24">
+                <label class="checkbox-line"><input id="scanAutoAdd" type="checkbox" checked> Auto-add</label>
+                <label class="checkbox-line">SSH <input id="scanSshPort" type="number" value="22" min="1" max="65535"></label>
+                <label class="checkbox-line">Yate <input id="scanTelnetPort" type="number" value="5038" min="1" max="65535"></label>
+                <button id="scanBtn" class="primary">Scan subnet</button>
+              </div>
+              <div class="form-grid" style="margin-top: 10px">
+                <label>SSH login
+                  <input id="scanUser" value="pi">
+                </label>
+                <label>SSH password
+                  <input id="scanPassword" type="password" value="raspberry">
+                </label>
+              </div>
+              <div class="panel" style="margin-top: 12px">
+                <div class="panel-body">
+                  <div class="scan-progress-wrap"><div id="scanBar" class="scan-progress-bar"></div></div>
+                  <div class="scan-progress-label">
+                    <span id="scanProgressText">idle</span>
+                    <span id="scanFoundText">0 found</span>
+                  </div>
+                  <div id="scanGrid" class="scan-grid"></div>
+                  <div id="scanResults" class="scan-results"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <span>Manual add</span>
+              <span id="addState" class="status"></span>
+            </div>
+            <div class="panel-body">
+              <div class="form-grid">
+                <label>Name
+                  <input id="addName" placeholder="bts-1">
+                </label>
+                <label>IP
+                  <input id="addIp" placeholder="192.168.1.50">
+                </label>
+                <label>SSH login
+                  <input id="addUser" value="pi">
+                </label>
+                <label>SSH password
+                  <input id="addPassword" type="password" value="raspberry">
+                </label>
+                <label>Service
+                  <input id="addService" value="yate.service">
+                </label>
+                <div class="toolbar">
+                  <button id="addBtn" class="primary">Add node</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
-      </section>
-    </div>
 
-    <div id="workView" class="tab-view" hidden>
-      <section>
-        <div id="nodeTabs" class="node-tabs"></div>
-        <div id="nodeEmpty" class="empty-state" hidden>No nodes yet. Open Add / Discover to add one.</div>
-      </section>
+        <div id="workView" class="tab-view dashboard-grid" hidden>
+          <div class="stats-row">
+            <div class="stat-card"><div class="stat-label">Total nodes</div><div id="statTotal" class="stat-val">0</div></div>
+            <div class="stat-card"><div class="stat-label">Online</div><div id="statOnline" class="stat-val ok">0</div></div>
+            <div class="stat-card"><div class="stat-label">Warning</div><div id="statWarn" class="stat-val warn">0</div></div>
+            <div class="stat-card"><div class="stat-label">Offline</div><div id="statOffline" class="stat-val bad">0</div></div>
+          </div>
 
-      <div class="split">
-        <section>
-          <div class="section-head">
-            <h2>Node Overview</h2>
-            <span id="nodeState" class="status"></span>
-          </div>
-          <div class="content" style="padding: 0">
-            <table>
-              <thead>
-                <tr>
-                  <th style="width: 20%">Name</th>
-                  <th style="width: 16%">IP</th>
-                  <th style="width: 15%">Online</th>
-                  <th style="width: 14%">Yate</th>
-                  <th style="width: 17%">Access</th>
-                  <th style="width: 18%">Actions</th>
-                </tr>
-              </thead>
-              <tbody id="nodesBody"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <section>
-          <div class="section-head">
-            <h2>Service</h2>
-            <span id="actionState" class="status"></span>
-          </div>
-          <div class="content">
-            <div id="selectedNode" class="muted">No node selected</div>
-            <div class="toolbar" style="margin-top: 12px">
-              <button data-action="start">Start</button>
-              <button data-action="restart" class="primary">Restart</button>
-              <button data-action="stop" class="danger">Stop</button>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <section>
-        <div class="section-head">
-          <h2>Logs</h2>
-          <span id="logState" class="status"></span>
-        </div>
-        <div class="content">
-          <div class="grid">
-            <label>File
-              <input id="logPath" value="/var/log/yate.err">
-            </label>
-            <label>Last lines
-              <input id="logLines" type="number" value="200" min="0" max="2000">
-            </label>
-            <label class="checkbox-line">
-              <input id="logSudo" type="checkbox">
-              Read through sudo
-            </label>
-            <div class="toolbar">
-              <button id="startLogBtn" class="primary">Start tail</button>
-              <button id="stopLogBtn">Stop</button>
-              <button id="clearLogBtn">Clear</button>
-            </div>
-          </div>
-          <div id="logTerminal" class="terminal" style="margin-top: 12px"></div>
-        </div>
-      </section>
-
-      <section>
-        <div class="section-head">
-          <h2>Telnet Commands</h2>
-          <span id="telnetState" class="status"></span>
-        </div>
-        <div class="content split">
           <div>
-            <label>Command
-              <input id="telnetCommand" value="mbts sgsn list">
-            </label>
-            <div class="toolbar" style="margin: 10px 0">
-              <button id="sendTelnetBtn" class="primary">Send</button>
-              <button id="clearOutputBtn">Clear</button>
+            <div class="section-title">
+              <span>Discovered nodes</span>
+              <span id="nodeState" class="status"></span>
             </div>
-            <div id="terminal" class="terminal"></div>
+            <div id="nodeEmpty" class="empty-state" hidden>No nodes yet. Open Scan / Add to add one.</div>
+            <div id="nodesBody" class="node-list"></div>
           </div>
-          <div>
-            <h2 style="margin-bottom: 6px">Templates</h2>
-            <div id="templates"></div>
+
+          <div class="detail-grid">
+            <div class="panel">
+              <div class="panel-head"><span>Node info</span><span id="selectedNodeState" class="status"></span></div>
+              <div id="nodeInfo" class="panel-body info-grid"></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><span>Service control</span><span id="actionState" class="status"></span></div>
+              <div class="panel-body action-grid">
+                <button data-action="start" class="ok">Start</button>
+                <button data-action="restart" class="primary">Restart</button>
+                <button data-action="stop" class="danger">Stop</button>
+                <button data-action="configure-rmanager-addr" class="info">Telnet bind</button>
+              </div>
+            </div>
+
+            <div id="consolePanel" class="panel">
+              <div class="panel-head"><span>Yate telnet console</span><span id="telnetState" class="status"></span></div>
+              <div id="terminal" class="terminal"></div>
+              <div class="cmd-bar">
+                <span style="font-family: var(--font-mono); color: var(--terminal-blue);">&gt;</span>
+                <input id="telnetCommand" value="mbts sgsn list">
+                <button id="sendTelnetBtn" class="primary">Send</button>
+                <button id="clearOutputBtn">Clear</button>
+              </div>
+              <div class="panel-body">
+                <div id="templates"></div>
+              </div>
+            </div>
+
+            <div id="logsPanel" class="panel">
+              <div class="panel-head"><span>Live log stream</span><span id="logState" class="status"></span></div>
+              <div class="panel-body form-grid">
+                <label>File
+                  <input id="logPath" value="/var/log/yate.err">
+                </label>
+                <label>Last lines
+                  <input id="logLines" type="number" value="200" min="0" max="2000">
+                </label>
+                <label class="checkbox-line">
+                  <input id="logSudo" type="checkbox"> Read through sudo
+                </label>
+                <div class="toolbar">
+                  <button id="startLogBtn" class="primary">Start tail</button>
+                  <button id="stopLogBtn">Stop</button>
+                  <button id="clearLogBtn">Clear</button>
+                </div>
+              </div>
+              <div id="logTerminal" class="terminal short"></div>
+            </div>
           </div>
         </div>
-      </section>
+      </main>
     </div>
-  </main>
+  </div>
 
   <script>
     const state = { nodes: [], selectedId: null, templates: [], logSource: null };
@@ -1216,10 +1599,6 @@ INDEX_HTML = r"""<!doctype html>
       return data;
     }
 
-    function pill(text, kind) {
-      return `<span class="pill ${kind}">${esc(text)}</span>`;
-    }
-
     function showView(name) {
       document.querySelectorAll(".tab-view").forEach((view) => {
         view.hidden = view.id !== `${name}View`;
@@ -1231,72 +1610,107 @@ INDEX_HTML = r"""<!doctype html>
       });
     }
 
-    function renderNodeTabs() {
-      const tabs = $("nodeTabs");
-      const empty = $("nodeEmpty");
-      if (!state.nodes.length) {
-        tabs.innerHTML = "";
-        empty.hidden = false;
-        return;
-      }
-      empty.hidden = true;
-      tabs.innerHTML = state.nodes.map((node) => {
-        const live = node.live || {};
-        const dot = live.online ? "ok" : "bad";
-        const label = node.name || node.ip;
-        return `
-          <button class="node-tab ${node.id === state.selectedId ? "active" : ""}" data-node-tab="${esc(node.id)}">
-            <span class="node-tab-title"><span class="node-dot ${dot}"></span>${esc(label)}</span>
-            <span class="node-tab-meta">${esc(node.ip)} · ${esc(live.service || "unknown")}</span>
-          </button>
-        `;
-      }).join("");
-      tabs.querySelectorAll("[data-node-tab]").forEach((btn) => {
-        btn.addEventListener("click", () => selectNode(btn.dataset.nodeTab));
-      });
+    function pill(text, kind) {
+      return `<span class="pill ${kind}">${esc(text)}</span>`;
+    }
+
+    function statusKind(node) {
+      const live = node.live || {};
+      if (!live.online) return "dead";
+      if (live.service && live.service !== "active") return "warn";
+      if (!live.telnet_open || live.auth_ok === false) return "warn";
+      return "ok";
+    }
+
+    function statusLabel(node) {
+      const live = node.live || {};
+      if (!live.online) return "unreachable";
+      if (live.service && live.service !== "active") return `yate.service ${live.service}`;
+      if (!live.telnet_open) return "telnet closed";
+      return "yate.service active";
+    }
+
+    function renderStats() {
+      const total = state.nodes.length;
+      const online = state.nodes.filter((node) => node.live?.online).length;
+      const warn = state.nodes.filter((node) => statusKind(node) === "warn").length;
+      const offline = state.nodes.filter((node) => statusKind(node) === "dead").length;
+      $("statTotal").textContent = total;
+      $("statOnline").textContent = online;
+      $("statWarn").textContent = warn;
+      $("statOffline").textContent = offline;
     }
 
     function renderNodes() {
       const body = $("nodesBody");
+      const empty = $("nodeEmpty");
       if (!state.nodes.length) {
-        body.innerHTML = `<tr><td colspan="6" class="muted">No nodes yet</td></tr>`;
+        body.innerHTML = "";
+        empty.hidden = false;
+        renderStats();
         return;
       }
+      empty.hidden = true;
       body.innerHTML = state.nodes.map((node) => {
         const live = node.live || {};
-        const online = live.online ? pill("online", "ok") : pill("offline", "bad");
-        const serviceKind = live.service === "active" ? "ok" : live.service === "unknown" ? "warn" : "bad";
-        const service = pill(live.service || "unknown", serviceKind);
-        const auth = live.auth_ok === true
-          ? pill("ssh ok", "ok")
-          : live.auth_ok === false
-            ? pill("ssh fail", "bad")
-            : (live.ssh_open ? pill("ssh open", "warn") : pill("no ssh", "bad"));
+        const kind = statusKind(node);
+        const pulse = kind === "ok" ? "" : kind;
+        const label = statusLabel(node);
+        const serviceBadge = live.service === "active"
+          ? `<span class="badge ssh">active</span>`
+          : `<span class="badge ${kind === "dead" ? "bad" : "warn"}">${esc(live.service || "unknown")}</span>`;
         return `
-          <tr class="${node.id === state.selectedId ? "selected" : ""}" data-id="${esc(node.id)}">
-            <td><strong>${esc(node.name)}</strong><div class="muted">${esc(live.hostname || "")}</div></td>
-            <td>${esc(node.ip)}</td>
-            <td>${online}<div class="muted">telnet ${live.telnet_open ? "open" : "closed"}</div></td>
-            <td>${service}</td>
-            <td>${auth}<div class="muted">${esc(live.auth_error || "")}</div></td>
-            <td>
-              <div class="toolbar">
-                <button data-select="${esc(node.id)}">Focus</button>
-                <button data-delete="${esc(node.id)}">Delete</button>
-              </div>
-            </td>
-          </tr>
+          <div class="node-card ${node.id === state.selectedId ? "selected" : ""}" data-id="${esc(node.id)}">
+            <div class="pulse-wrap"><div class="pulse-ring ${pulse}"></div><div class="pulse-dot ${pulse}"></div></div>
+            <div>
+              <div class="node-ip">${esc(node.ip)}</div>
+              <div class="node-name">${esc(node.name || live.hostname || "bts node")} · ${esc(label)}</div>
+            </div>
+            <div class="node-badges">
+              ${live.ssh_open ? `<span class="badge ssh">SSH</span>` : `<span class="badge bad">no ssh</span>`}
+              ${live.telnet_open ? `<span class="badge tel">:${esc(node.telnet_port)}</span>` : `<span class="badge warn">tel closed</span>`}
+              ${serviceBadge}
+            </div>
+            <div class="node-actions">
+              <button class="icon-btn" data-select="${esc(node.id)}" title="Focus">F</button>
+              <button class="icon-btn" data-delete="${esc(node.id)}" title="Delete">D</button>
+            </div>
+          </div>
         `;
       }).join("");
       body.querySelectorAll("[data-select]").forEach((btn) => {
         btn.addEventListener("click", () => selectNode(btn.dataset.select));
       });
       body.querySelectorAll("[data-delete]").forEach((btn) => {
+        btn.addEventListener("click", (event) => event.stopPropagation());
         btn.addEventListener("click", () => deleteNode(btn.dataset.delete));
       });
-      body.querySelectorAll("tr[data-id]").forEach((row) => {
-        row.addEventListener("dblclick", () => selectNode(row.dataset.id));
+      body.querySelectorAll(".node-card[data-id]").forEach((card) => {
+        card.addEventListener("click", () => selectNode(card.dataset.id));
       });
+      renderStats();
+    }
+
+    function renderNodeInfo(node) {
+      const info = $("nodeInfo");
+      if (!node) {
+        info.innerHTML = `<div class="muted">Select a node to inspect live status.</div>`;
+        $("selectedNodeState").textContent = "";
+        return;
+      }
+      const live = node.live || {};
+      const sshClass = live.ssh_open ? "ok" : "bad";
+      const telClass = live.telnet_open ? "ok" : "warn";
+      const svcClass = live.service === "active" ? "ok" : live.service === "unknown" ? "warn" : "bad";
+      $("selectedNodeState").textContent = `${node.ip}:${node.telnet_port}`;
+      info.innerHTML = `
+        <div><div class="info-label">IP address</div><div class="info-val">${esc(node.ip)}</div></div>
+        <div><div class="info-label">Hostname</div><div class="info-val">${esc(live.hostname || node.name || "-")}</div></div>
+        <div><div class="info-label">SSH port</div><div class="info-val ${sshClass}">:${esc(node.ssh_port)} ${live.ssh_open ? "open" : "closed"}</div></div>
+        <div><div class="info-label">Yate telnet</div><div class="info-val ${telClass}">:${esc(node.telnet_port)} ${live.telnet_open ? "open" : "closed"}</div></div>
+        <div><div class="info-label">Service</div><div class="info-val ${svcClass}">${esc(live.service || "unknown")}</div></div>
+        <div><div class="info-label">Credentials</div><div class="info-val">${esc(node.user)} / ${node.has_password ? "stored" : "key"}</div></div>
+      `;
     }
 
     function renderSelected() {
@@ -1304,7 +1718,7 @@ INDEX_HTML = r"""<!doctype html>
       $("selectedNode").innerHTML = node
         ? `<strong>${esc(node.name)}</strong> <span class="muted">${esc(node.ip)} / ${esc(node.service)}</span>`
         : "No node selected";
-      renderNodeTabs();
+      renderNodeInfo(node);
       renderNodes();
     }
 
@@ -1314,9 +1728,42 @@ INDEX_HTML = r"""<!doctype html>
       renderSelected();
     }
 
+    function buildScanGrid(activeCount = 0, foundIps = []) {
+      const grid = $("scanGrid");
+      const foundCells = new Set(foundIps.map((ip) => (Number(String(ip).split(".").pop()) - 1) % 64));
+      grid.innerHTML = Array.from({ length: 64 }, (_, index) => {
+        const cls = foundCells.has(index) ? "found" : index < activeCount ? "active" : "";
+        return `<div class="scan-cell ${cls}"></div>`;
+      }).join("");
+    }
+
+    function renderScanResults(discoveries) {
+      $("scanResults").innerHTML = (discoveries || []).map((item) => {
+        const ssh = item.ssh_open ? `<span class="badge ssh">SSH</span>` : "";
+        const tel = item.telnet_open ? `<span class="badge tel">:${esc($("scanTelnetPort").value || 5038)}</span>` : "";
+        const service = item.service ? `<span class="muted">${esc(item.service)}</span>` : "";
+        return `
+          <div class="scan-result-row">
+            <span class="node-ip">${esc(item.ip)}</span>
+            ${ssh}${tel}${service}
+          </div>
+        `;
+      }).join("");
+    }
+
+    function setScanIdle() {
+      $("scanBar").classList.remove("scanning");
+      $("scanBar").style.width = "0%";
+      $("scanProgressText").textContent = "idle";
+      $("scanFoundText").textContent = "0 found";
+      buildScanGrid();
+      renderScanResults([]);
+    }
+
     async function loadConfig() {
       const data = await api("/api/config");
       $("scanCidr").value = data.default_cidr;
+      $("headerSubnet").textContent = data.default_cidr;
       $("sshpassState").textContent = data.sshpass ? "sshpass: ok" : "sshpass: missing";
       state.templates = data.templates || [];
       $("templates").innerHTML = state.templates.map((tpl) => `
@@ -1328,6 +1775,7 @@ INDEX_HTML = r"""<!doctype html>
       $("templates").querySelectorAll("[data-template]").forEach((btn) => {
         btn.addEventListener("click", () => { $("telnetCommand").value = btn.dataset.template; });
       });
+      setScanIdle();
     }
 
     async function loadNodes() {
@@ -1345,6 +1793,11 @@ INDEX_HTML = r"""<!doctype html>
     async function scan() {
       $("scanBtn").disabled = true;
       $("scanState").textContent = "scanning...";
+      $("scanBar").classList.add("scanning");
+      $("scanProgressText").textContent = `${$("scanCidr").value || "subnet"} · checking SSH and Yate`;
+      $("scanFoundText").textContent = "scanning";
+      $("scanResults").innerHTML = "";
+      buildScanGrid(64);
       try {
         const data = await api("/api/scan", {
           method: "POST",
@@ -1357,10 +1810,20 @@ INDEX_HTML = r"""<!doctype html>
             auto_add: $("scanAutoAdd").checked
           }
         });
-        $("scanState").textContent = `found: ${(data.discoveries || []).length}`;
+        const discoveries = data.discoveries || [];
+        $("scanState").textContent = `found: ${discoveries.length}`;
+        $("scanBar").classList.remove("scanning");
+        $("scanBar").style.width = "100%";
+        $("scanProgressText").textContent = "scan complete";
+        $("scanFoundText").textContent = `${discoveries.length} found`;
+        buildScanGrid(64, discoveries.map((item) => item.ip));
+        renderScanResults(discoveries);
         await loadNodes();
       } catch (err) {
         $("scanState").textContent = err.message;
+        $("scanBar").classList.remove("scanning");
+        $("scanBar").style.width = "0%";
+        $("scanProgressText").textContent = "scan failed";
       } finally {
         $("scanBtn").disabled = false;
       }
@@ -1400,7 +1863,13 @@ INDEX_HTML = r"""<!doctype html>
         $("actionState").textContent = "select a node";
         return;
       }
-      $("actionState").textContent = `${action}...`;
+      const actionText = action === "configure-rmanager-addr"
+        ? "configure telnet bind"
+        : action;
+      const shownCommand = action === "configure-rmanager-addr"
+        ? `set ${node.service} rmanager addr=0.0.0.0; restart ${node.service}`
+        : `systemctl ${action} ${node.service}`;
+      $("actionState").textContent = `${actionText}...`;
       try {
         const data = await api(`/api/nodes/${encodeURIComponent(node.id)}/action`, {
           method: "POST",
@@ -1408,10 +1877,10 @@ INDEX_HTML = r"""<!doctype html>
         });
         const result = data.result || {};
         $("actionState").textContent = result.ok ? "done" : `error rc=${result.rc}`;
-        writeOutput(`$ systemctl ${action} ${node.service}\n${result.stdout || ""}${result.stderr || ""}\n`);
+        writeOutput(`$ ${shownCommand}\n${result.stdout || ""}${result.stderr || ""}\n`);
         await loadNodes();
       } catch (err) {
-        $("actionState").textContent = err.message;
+        $("actionState").textContent = `${actionText}: ${err.message}`;
       }
     }
 
@@ -1511,6 +1980,13 @@ INDEX_HTML = r"""<!doctype html>
     $("clearLogBtn").addEventListener("click", () => { $("logTerminal").textContent = ""; });
     document.querySelectorAll(".app-tab").forEach((tab) => {
       tab.addEventListener("click", () => showView(tab.dataset.view));
+    });
+    document.querySelectorAll("[data-focus-panel]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        showView("work");
+        const target = btn.dataset.focusPanel === "logs" ? $("logsPanel") : $("consolePanel");
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
     });
     document.querySelectorAll("[data-action]").forEach((btn) => {
       btn.addEventListener("click", () => serviceAction(btn.dataset.action));

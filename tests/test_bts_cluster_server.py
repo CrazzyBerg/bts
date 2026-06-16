@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,24 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(server.normalize_tail_lines("9999"), 2000)
         self.assertEqual(server.normalize_tail_lines("bad"), 200)
 
+    def test_telnet_error_message_explains_connection_refused(self) -> None:
+        message = server.telnet_error_message(
+            ConnectionRefusedError(111, "Connection refused"),
+            "192.168.1.20",
+            5038,
+        )
+        self.assertIn("Telnet connection refused by 192.168.1.20:5038", message)
+        self.assertIn("Yate rmanager is not listening", message)
+
+    def test_telnet_error_message_explains_timeout(self) -> None:
+        message = server.telnet_error_message(
+            TimeoutError(110, "Connection timed out"),
+            "192.168.1.20",
+            5038,
+        )
+        self.assertIn("timed out", message)
+        self.assertIn("192.168.1.20:5038", message)
+
 
 class CommandBuildTest(unittest.TestCase):
     def test_build_tail_command_quotes_path(self) -> None:
@@ -39,6 +58,29 @@ class CommandBuildTest(unittest.TestCase):
         command = server.build_tail_command(node, "/var/log/yate.err", 10, use_sudo=True)
         self.assertIn("sudo -S -p '' tail -n 10 -F -- /var/log/yate.err", command)
         self.assertIn("raspberry", command)
+
+    def test_rmanager_addr_update_changes_only_general_addr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "rmanager.conf"
+            conf.write_text(
+                "[general]\n"
+                ";port=5038\n"
+                ";addr=127.0.0.1\n"
+                "telnet=yes\n"
+                "\n"
+                "[other]\n"
+                "addr=10.1.1.1\n"
+            )
+            subprocess.run(
+                ["python3", "-c", server.rmanager_addr_update_script(), str(conf), "0.0.0.0"],
+                check=True,
+            )
+            updated = conf.read_text()
+
+        self.assertIn(";port=5038", updated)
+        self.assertIn("addr=0.0.0.0", updated)
+        self.assertIn("[other]\naddr=10.1.1.1", updated)
+        self.assertNotIn(";addr=127.0.0.1", updated)
 
 
 class InventoryTest(unittest.TestCase):
