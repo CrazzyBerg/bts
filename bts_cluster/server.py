@@ -411,21 +411,52 @@ def build_tail_command(node: Node, path: str, lines: int, use_sudo: bool) -> str
     return f"sudo -n {tail}"
 
 
+def parse_service_status_stdout(stdout: str) -> dict[str, str]:
+    values = {
+        "hostname": "",
+        "service": "unknown",
+        "active_state": "",
+        "substate": "",
+        "main_pid": "",
+        "yate_pid": "",
+    }
+    for line in stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in values:
+            values[key] = value.strip()
+
+    service = values["service"] or values["active_state"] or "unknown"
+    process_alive = values["main_pid"].isdigit() and int(values["main_pid"]) > 0
+    process_alive = process_alive or bool(values["yate_pid"])
+    if service != "active" and process_alive:
+        service = "active"
+    elif service == "unknown" and values["substate"] == "running":
+        service = "active"
+
+    return {
+        "hostname": values["hostname"],
+        "service": service,
+        "active_state": values["active_state"],
+        "substate": values["substate"],
+        "main_pid": values["main_pid"],
+        "yate_pid": values["yate_pid"],
+    }
+
+
 def service_status(node: Node) -> dict[str, Any]:
+    service = shlex.quote(node.service)
     command = (
         "printf 'hostname='; hostname 2>/dev/null || true; "
-        f"printf 'service='; systemctl is-active {node.service} 2>/dev/null || true"
+        f"printf 'service='; systemctl is-active {service} 2>/dev/null || true; "
+        f"printf 'active_state='; systemctl show -p ActiveState --value {service} 2>/dev/null || true; "
+        f"printf 'substate='; systemctl show -p SubState --value {service} 2>/dev/null || true; "
+        f"printf 'main_pid='; systemctl show -p MainPID --value {service} 2>/dev/null || true; "
+        "printf 'yate_pid='; pgrep -x yate 2>/dev/null | head -n 1 || true"
     )
-    result = run_ssh(node, command, timeout=7, batch=not bool(node.password))
-    hostname = ""
-    service = "unknown"
-    if result["stdout"]:
-        for line in result["stdout"].splitlines():
-            if line.startswith("hostname="):
-                hostname = line.split("=", 1)[1].strip()
-            elif line.startswith("service="):
-                service = line.split("=", 1)[1].strip() or "unknown"
-    return {"hostname": hostname, "service": service, "ssh": result}
+    result = run_ssh(node, command, timeout=10, batch=not bool(node.password))
+    parsed = parse_service_status_stdout(result["stdout"])
+    parsed["ssh"] = result
+    return parsed
 
 
 def probe_node(node: Node, verify_auth: bool = True, timeout: float = 1.2) -> dict[str, Any]:

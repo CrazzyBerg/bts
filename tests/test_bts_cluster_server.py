@@ -46,6 +46,29 @@ class ValidationTest(unittest.TestCase):
         self.assertIn("timed out", message)
         self.assertIn("192.168.1.20:5038", message)
 
+    def test_parse_service_status_uses_main_pid_fallback(self) -> None:
+        parsed = server.parse_service_status_stdout(
+            "hostname=pi-bts\n"
+            "service=unknown\n"
+            "active_state=\n"
+            "substate=\n"
+            "main_pid=1234\n"
+            "yate_pid=\n"
+        )
+        self.assertEqual(parsed["hostname"], "pi-bts")
+        self.assertEqual(parsed["service"], "active")
+
+    def test_parse_service_status_uses_yate_process_fallback(self) -> None:
+        parsed = server.parse_service_status_stdout(
+            "hostname=pi-bts\n"
+            "service=inactive\n"
+            "active_state=inactive\n"
+            "substate=dead\n"
+            "main_pid=0\n"
+            "yate_pid=4321\n"
+        )
+        self.assertEqual(parsed["service"], "active")
+
 
 class CommandBuildTest(unittest.TestCase):
     def test_build_tail_command_quotes_path(self) -> None:
