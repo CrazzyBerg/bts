@@ -75,6 +75,10 @@ class Node:
     ssh_port: int = DEFAULT_SSH_PORT
     telnet_port: int = DEFAULT_TELNET_PORT
     service: str = DEFAULT_SERVICE
+    radio_band: str = ""
+    radio_c0: str = ""
+    ms_ip_base: str = ""
+    ms_ip_max_count: str = ""
     created_at: int = 0
     updated_at: int = 0
 
@@ -122,6 +126,116 @@ def validate_ip(value: str) -> str:
         return str(ipaddress.ip_address(value))
     except ValueError as exc:
         raise ValueError(f"Invalid IP address: {value}") from exc
+
+
+def normalize_radio_band(value: Any) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if not re.match(r"^[A-Za-z0-9_.-]{1,32}$", value):
+        raise ValueError("Invalid Radio.Band value")
+    return value
+
+
+def normalize_radio_c0(value: Any) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    try:
+        arfcn = int(value)
+    except ValueError as exc:
+        raise ValueError("Radio.C0 must be a number") from exc
+    if arfcn < 0 or arfcn > 1023:
+        raise ValueError("Radio.C0 must be between 0 and 1023")
+    return str(arfcn)
+
+
+def normalize_ms_ip_base(value: Any) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise ValueError("MS.IP.Base must be a valid IP address") from exc
+    if not isinstance(ip, ipaddress.IPv4Address):
+        raise ValueError("MS.IP.Base must be an IPv4 address")
+    return str(ip)
+
+
+def normalize_ms_ip_max_count(value: Any) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise ValueError("MS.IP.MaxCount must be a number") from exc
+    if count < 1 or count > 65535:
+        raise ValueError("MS.IP.MaxCount must be between 1 and 65535")
+    return str(count)
+
+
+def frequency_key(node: Node) -> tuple[str, str] | None:
+    if not node.radio_band or not node.radio_c0:
+        return None
+    return (node.radio_band.lower(), node.radio_c0)
+
+
+def ms_ip_range(node: Node) -> tuple[int, int] | None:
+    if not node.ms_ip_base or not node.ms_ip_max_count:
+        return None
+    start = int(ipaddress.IPv4Address(node.ms_ip_base))
+    count = int(node.ms_ip_max_count)
+    end = start + count - 1
+    if end > int(ipaddress.IPv4Address("255.255.255.255")):
+        raise ValueError("MS.IP range exceeds IPv4 address space")
+    return (start, end)
+
+
+def ip_ranges_overlap(left: tuple[int, int], right: tuple[int, int]) -> bool:
+    return left[0] <= right[1] and right[0] <= left[1]
+
+
+def validate_node_uniqueness(nodes: list[Node], candidate: Node) -> None:
+    candidate_ms_range = ms_ip_range(candidate)
+    for node in nodes:
+        if node.id == candidate.id:
+            continue
+        if node.ip == candidate.ip:
+            raise ValueError(f"IP address {candidate.ip} is already assigned to {node.name or node.id}")
+        if frequency_key(node) and frequency_key(node) == frequency_key(candidate):
+            raise ValueError(
+                f"Radio.Band {candidate.radio_band} with Radio.C0 {candidate.radio_c0} "
+                f"is already assigned to {node.name or node.ip}"
+            )
+        node_ms_range = ms_ip_range(node)
+        if candidate_ms_range and node_ms_range and ip_ranges_overlap(candidate_ms_range, node_ms_range):
+            raise ValueError(
+                f"MS IP range {candidate.ms_ip_base}/{candidate.ms_ip_max_count} "
+                f"overlaps with {node.name or node.ip}"
+            )
+
+
+def inventory_conflicts(nodes: list[Node]) -> dict[str, list[str]]:
+    conflicts: dict[str, list[str]] = {node.id: [] for node in nodes}
+    for idx, left in enumerate(nodes):
+        for right in nodes[idx + 1 :]:
+            if left.ip == right.ip:
+                message = f"Duplicate IP {left.ip}"
+                conflicts[left.id].append(message)
+                conflicts[right.id].append(message)
+            if frequency_key(left) and frequency_key(left) == frequency_key(right):
+                message = f"Duplicate Radio.Band {left.radio_band} / Radio.C0 {left.radio_c0}"
+                conflicts[left.id].append(message)
+                conflicts[right.id].append(message)
+            left_ms_range = ms_ip_range(left)
+            right_ms_range = ms_ip_range(right)
+            if left_ms_range and right_ms_range and ip_ranges_overlap(left_ms_range, right_ms_range):
+                message = "Overlapping MS.IP range"
+                conflicts[left.id].append(message)
+                conflicts[right.id].append(message)
+    return conflicts
 
 
 def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -419,6 +533,7 @@ def parse_service_status_stdout(stdout: str) -> dict[str, str]:
         "substate": "",
         "main_pid": "",
         "yate_pid": "",
+        "yate_cmd_pid": "",
     }
     for line in stdout.splitlines():
         key, sep, value = line.partition("=")
@@ -427,7 +542,7 @@ def parse_service_status_stdout(stdout: str) -> dict[str, str]:
 
     service = values["service"] or values["active_state"] or "unknown"
     process_alive = values["main_pid"].isdigit() and int(values["main_pid"]) > 0
-    process_alive = process_alive or bool(values["yate_pid"])
+    process_alive = process_alive or bool(values["yate_pid"] or values["yate_cmd_pid"])
     if service != "active" and process_alive:
         service = "active"
     elif service == "unknown" and values["substate"] == "running":
@@ -440,6 +555,7 @@ def parse_service_status_stdout(stdout: str) -> dict[str, str]:
         "substate": values["substate"],
         "main_pid": values["main_pid"],
         "yate_pid": values["yate_pid"],
+        "yate_cmd_pid": values["yate_cmd_pid"],
     }
 
 
@@ -447,11 +563,12 @@ def service_status(node: Node) -> dict[str, Any]:
     service = shlex.quote(node.service)
     command = (
         "printf 'hostname='; hostname 2>/dev/null || true; "
+        "printf 'yate_pid='; pgrep -x yate 2>/dev/null | head -n 1 || true; "
+        "printf 'yate_cmd_pid='; pgrep -f '(^|/)(lt-)?yate([[:space:]]|$)|/usr/local/bin/yate' 2>/dev/null | head -n 1 || true; "
         f"printf 'service='; systemctl is-active {service} 2>/dev/null || true; "
         f"printf 'active_state='; systemctl show -p ActiveState --value {service} 2>/dev/null || true; "
         f"printf 'substate='; systemctl show -p SubState --value {service} 2>/dev/null || true; "
-        f"printf 'main_pid='; systemctl show -p MainPID --value {service} 2>/dev/null || true; "
-        "printf 'yate_pid='; pgrep -x yate 2>/dev/null | head -n 1 || true"
+        f"printf 'main_pid='; systemctl show -p MainPID --value {service} 2>/dev/null || true"
     )
     result = run_ssh(node, command, timeout=10, batch=not bool(node.password))
     parsed = parse_service_status_stdout(result["stdout"])
@@ -478,11 +595,15 @@ def probe_node(node: Node, verify_auth: bool = True, timeout: float = 1.2) -> di
             info["auth_ok"] = bool(status["ssh"]["ok"])
             info["hostname"] = status["hostname"]
             info["service"] = status["service"]
+            if info["service"] == "unknown" and telnet_open:
+                info["service"] = "active"
             if not status["ssh"]["ok"]:
                 info["auth_error"] = compact_error(status["ssh"]["stderr"])
         except RuntimeError as exc:
             info["auth_ok"] = None
             info["auth_error"] = str(exc)
+    elif telnet_open:
+        info["service"] = "active"
     return info
 
 
@@ -556,10 +677,15 @@ def scan_subnet(
     return results
 
 
-def node_public(node: Node, live: dict[str, Any] | None = None) -> dict[str, Any]:
+def node_public(
+    node: Node,
+    live: dict[str, Any] | None = None,
+    conflicts: list[str] | None = None,
+) -> dict[str, Any]:
     data = asdict(node)
     data.pop("password", None)
     data["has_password"] = bool(node.password)
+    data["conflicts"] = conflicts or []
     if live:
         data["live"] = live
     return data
@@ -644,10 +770,17 @@ class App(BaseHTTPRequestHandler):
                     futures = {executor.submit(probe_node, node, True): node.id for node in nodes}
                     for future in concurrent.futures.as_completed(futures):
                         live_by_id[futures[future]] = future.result()
+            conflicts_by_id = inventory_conflicts(nodes)
             json_response(
                 self,
                 HTTPStatus.OK,
-                {"ok": True, "nodes": [node_public(node, live_by_id.get(node.id)) for node in nodes]},
+                {
+                    "ok": True,
+                    "nodes": [
+                        node_public(node, live_by_id.get(node.id), conflicts_by_id.get(node.id))
+                        for node in nodes
+                    ],
+                },
             )
             return
         error_response(self, HTTPStatus.NOT_FOUND, "Not found")
@@ -705,8 +838,13 @@ class App(BaseHTTPRequestHandler):
         node.ssh_port = int(payload.get("ssh_port") or DEFAULT_SSH_PORT)
         node.telnet_port = int(payload.get("telnet_port") or DEFAULT_TELNET_PORT)
         node.service = str(payload.get("service") or DEFAULT_SERVICE).strip()
+        node.radio_band = normalize_radio_band(payload.get("radio_band"))
+        node.radio_c0 = normalize_radio_c0(payload.get("radio_c0"))
+        node.ms_ip_base = normalize_ms_ip_base(payload.get("ms_ip_base"))
+        node.ms_ip_max_count = normalize_ms_ip_max_count(payload.get("ms_ip_max_count"))
         if not SERVICE_RE.match(node.service):
             raise ValueError("Invalid service name")
+        validate_node_uniqueness(nodes, node)
         node.updated_at = ts
         if existing is None:
             nodes.append(node)
@@ -1528,6 +1666,18 @@ INDEX_HTML = r"""<!doctype html>
                 <label>Service
                   <input id="addService" value="yate.service">
                 </label>
+                <label>Radio.Band
+                  <input id="addRadioBand" placeholder="900">
+                </label>
+                <label>Radio.C0
+                  <input id="addRadioC0" type="number" min="0" max="1023" placeholder="62">
+                </label>
+                <label>MS.IP.Base
+                  <input id="addMsIpBase" placeholder="192.168.99.1">
+                </label>
+                <label>MS.IP.MaxCount
+                  <input id="addMsIpMaxCount" type="number" min="1" max="65535" placeholder="254">
+                </label>
                 <div class="toolbar">
                   <button id="addBtn" class="primary">Add node</button>
                 </div>
@@ -1687,6 +1837,9 @@ INDEX_HTML = r"""<!doctype html>
         const kind = statusKind(node);
         const pulse = kind === "ok" ? "" : kind;
         const label = statusLabel(node);
+        const radio = node.radio_band && node.radio_c0 ? `${node.radio_band} / C0 ${node.radio_c0}` : "radio unset";
+        const msPool = node.ms_ip_base && node.ms_ip_max_count ? `MS ${node.ms_ip_base} x${node.ms_ip_max_count}` : "MS pool unset";
+        const conflicts = node.conflicts || [];
         const serviceBadge = live.service === "active"
           ? `<span class="badge ssh">active</span>`
           : `<span class="badge ${kind === "dead" ? "bad" : "warn"}">${esc(live.service || "unknown")}</span>`;
@@ -1695,12 +1848,13 @@ INDEX_HTML = r"""<!doctype html>
             <div class="pulse-wrap"><div class="pulse-ring ${pulse}"></div><div class="pulse-dot ${pulse}"></div></div>
             <div>
               <div class="node-ip">${esc(node.ip)}</div>
-              <div class="node-name">${esc(node.name || live.hostname || "bts node")} · ${esc(label)}</div>
+              <div class="node-name">${esc(node.name || live.hostname || "bts node")} · ${esc(label)} · ${esc(radio)} · ${esc(msPool)}</div>
             </div>
             <div class="node-badges">
               ${live.ssh_open ? `<span class="badge ssh">SSH</span>` : `<span class="badge bad">no ssh</span>`}
               ${live.telnet_open ? `<span class="badge tel">:${esc(node.telnet_port)}</span>` : `<span class="badge warn">tel closed</span>`}
               ${serviceBadge}
+              ${conflicts.length ? `<span class="badge bad">conflict</span>` : ""}
             </div>
             <div class="node-actions">
               <button class="icon-btn" data-select="${esc(node.id)}" title="Focus">F</button>
@@ -1733,6 +1887,7 @@ INDEX_HTML = r"""<!doctype html>
       const sshClass = live.ssh_open ? "ok" : "bad";
       const telClass = live.telnet_open ? "ok" : "warn";
       const svcClass = live.service === "active" ? "ok" : live.service === "unknown" ? "warn" : "bad";
+      const conflicts = node.conflicts || [];
       $("selectedNodeState").textContent = `${node.ip}:${node.telnet_port}`;
       info.innerHTML = `
         <div><div class="info-label">IP address</div><div class="info-val">${esc(node.ip)}</div></div>
@@ -1741,6 +1896,11 @@ INDEX_HTML = r"""<!doctype html>
         <div><div class="info-label">Yate telnet</div><div class="info-val ${telClass}">:${esc(node.telnet_port)} ${live.telnet_open ? "open" : "closed"}</div></div>
         <div><div class="info-label">Service</div><div class="info-val ${svcClass}">${esc(live.service || "unknown")}</div></div>
         <div><div class="info-label">Credentials</div><div class="info-val">${esc(node.user)} / ${node.has_password ? "stored" : "key"}</div></div>
+        <div><div class="info-label">Radio.Band</div><div class="info-val">${esc(node.radio_band || "-")}</div></div>
+        <div><div class="info-label">Radio.C0</div><div class="info-val">${esc(node.radio_c0 || "-")}</div></div>
+        <div><div class="info-label">MS.IP.Base</div><div class="info-val">${esc(node.ms_ip_base || "-")}</div></div>
+        <div><div class="info-label">MS.IP.MaxCount</div><div class="info-val">${esc(node.ms_ip_max_count || "-")}</div></div>
+        <div style="grid-column: 1 / -1"><div class="info-label">Conflicts</div><div class="info-val ${conflicts.length ? "bad" : "ok"}">${esc(conflicts.join("; ") || "none")}</div></div>
       `;
     }
 
@@ -1870,7 +2030,11 @@ INDEX_HTML = r"""<!doctype html>
             ip: $("addIp").value,
             user: $("addUser").value,
             password: $("addPassword").value,
-            service: $("addService").value
+            service: $("addService").value,
+            radio_band: $("addRadioBand").value,
+            radio_c0: $("addRadioC0").value,
+            ms_ip_base: $("addMsIpBase").value,
+            ms_ip_max_count: $("addMsIpMaxCount").value
           }
         });
         state.selectedId = data.node.id;

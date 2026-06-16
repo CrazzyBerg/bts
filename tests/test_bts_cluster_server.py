@@ -69,6 +69,89 @@ class ValidationTest(unittest.TestCase):
         )
         self.assertEqual(parsed["service"], "active")
 
+    def test_parse_service_status_uses_yate_command_fallback(self) -> None:
+        parsed = server.parse_service_status_stdout(
+            "hostname=pi-bts\n"
+            "service=unknown\n"
+            "active_state=unknown\n"
+            "substate=dead\n"
+            "main_pid=0\n"
+            "yate_pid=\n"
+            "yate_cmd_pid=9876\n"
+        )
+        self.assertEqual(parsed["service"], "active")
+
+    def test_validate_node_uniqueness_rejects_duplicate_ip(self) -> None:
+        existing = server.Node(id="n1", name="bts-1", ip="192.168.1.10")
+        candidate = server.Node(id="n2", name="bts-2", ip="192.168.1.10")
+
+        with self.assertRaises(ValueError):
+            server.validate_node_uniqueness([existing], candidate)
+
+    def test_validate_node_uniqueness_rejects_duplicate_frequency(self) -> None:
+        existing = server.Node(id="n1", name="bts-1", ip="192.168.1.10", radio_band="900", radio_c0="975")
+        candidate = server.Node(id="n2", name="bts-2", ip="192.168.1.11", radio_band="900", radio_c0="975")
+
+        with self.assertRaises(ValueError):
+            server.validate_node_uniqueness([existing], candidate)
+
+    def test_validate_node_uniqueness_allows_different_arfcn(self) -> None:
+        existing = server.Node(id="n1", name="bts-1", ip="192.168.1.10", radio_band="900", radio_c0="975")
+        candidate = server.Node(id="n2", name="bts-2", ip="192.168.1.11", radio_band="900", radio_c0="976")
+
+        server.validate_node_uniqueness([existing], candidate)
+
+    def test_ms_ip_range_uses_base_and_max_count(self) -> None:
+        node = server.Node(
+            id="n1",
+            name="bts-1",
+            ip="192.168.1.10",
+            ms_ip_base="192.168.99.1",
+            ms_ip_max_count="254",
+        )
+
+        self.assertEqual(
+            server.ms_ip_range(node),
+            (int(server.ipaddress.IPv4Address("192.168.99.1")), int(server.ipaddress.IPv4Address("192.168.99.254"))),
+        )
+
+    def test_validate_node_uniqueness_rejects_overlapping_ms_ip_ranges(self) -> None:
+        existing = server.Node(
+            id="n1",
+            name="bts-1",
+            ip="192.168.1.10",
+            ms_ip_base="192.168.99.1",
+            ms_ip_max_count="100",
+        )
+        candidate = server.Node(
+            id="n2",
+            name="bts-2",
+            ip="192.168.1.11",
+            ms_ip_base="192.168.99.50",
+            ms_ip_max_count="100",
+        )
+
+        with self.assertRaises(ValueError):
+            server.validate_node_uniqueness([existing], candidate)
+
+    def test_validate_node_uniqueness_allows_adjacent_ms_ip_ranges(self) -> None:
+        existing = server.Node(
+            id="n1",
+            name="bts-1",
+            ip="192.168.1.10",
+            ms_ip_base="192.168.99.1",
+            ms_ip_max_count="100",
+        )
+        candidate = server.Node(
+            id="n2",
+            name="bts-2",
+            ip="192.168.1.11",
+            ms_ip_base="192.168.99.101",
+            ms_ip_max_count="100",
+        )
+
+        server.validate_node_uniqueness([existing], candidate)
+
 
 class CommandBuildTest(unittest.TestCase):
     def test_build_tail_command_quotes_path(self) -> None:
@@ -138,6 +221,22 @@ class ScanTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 server.scan_subnet("10.0.0.0/16")
         tcp_open.assert_not_called()
+
+    def test_probe_node_treats_open_telnet_as_active_when_systemctl_unknown(self) -> None:
+        node = server.Node(id="n1", name="bts", ip="192.168.1.10")
+        tcp_results = [True, True]
+        ssh_result = {"ok": True, "stdout": "", "stderr": "", "rc": 0}
+        with (
+            patch.object(server, "tcp_open", side_effect=tcp_results),
+            patch.object(
+                server,
+                "service_status",
+                return_value={"hostname": "pi-bts", "service": "unknown", "ssh": ssh_result},
+            ),
+        ):
+            info = server.probe_node(node)
+
+        self.assertEqual(info["service"], "active")
 
 
 class HttpApiTest(unittest.TestCase):

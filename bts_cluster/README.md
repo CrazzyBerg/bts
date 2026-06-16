@@ -22,6 +22,8 @@ http://127.0.0.1:8097/
 - verify default Raspberry Pi credentials `pi` / `raspberry` when `sshpass`
   is installed;
 - add nodes manually by IP;
+- track per-node `Radio.Band` / `Radio.C0` and `MS.IP.Base` / `MS.IP.MaxCount`,
+  preventing duplicate IP, duplicate ARFCN, or overlapping MS IP pool assignments;
 - start, restart, or stop `yate.service` over SSH;
 - set Yate rmanager `addr=0.0.0.0` on a node without changing the telnet port;
 - send custom Yate telnet/rmanager commands;
